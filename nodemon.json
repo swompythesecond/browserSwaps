@@ -1,0 +1,6 @@
+{
+  "watch": ["server/", "src/evm/htlc.artifact.json", ".env"],
+  "ignore": [".runtime/*", "server/*.json"],
+  "ext": "mjs",
+  "delay": "1000"
+}

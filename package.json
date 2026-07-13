@@ -1,0 +1,40 @@
+{
+  "name": "browserswaps",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Non-custodial atomic swaps between BrowserCoin (BRC) and USDT on Arbitrum, entirely in the browser.",
+  "scripts": {
+    "start": "concurrently -n server,web -c yellow,cyan \"npm run server:dev\" \"npm run dev\"",
+    "server:dev": "nodemon server/swapd.mjs --port 9250",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "compile:htlc": "node scripts/compile-htlc.mjs",
+    "server": "node server/swapd.mjs --port 9250",
+    "server:relayer": "node server/relayer.mjs --port 9200",
+    "server:market": "node server/market.mjs --port 9300",
+    "bot:maker": "tsx bots/maker.mjs"
+  },
+  "dependencies": {
+    "browsercoin": "github:swompythesecond/BrowserCoin",
+    "@noble/ed25519": "^2.1.0",
+    "@noble/hashes": "^1.5.0",
+    "argon2id": "^1.0.1",
+    "jsqr": "^1.4.0",
+    "peerjs": "^1.5.4",
+    "qrcode": "^1.5.4",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "concurrently": "^10.0.3",
+    "nodemon": "^3.1.14",
+    "solc": "^0.8.28",
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}
