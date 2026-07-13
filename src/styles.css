@@ -112,3 +112,8 @@ table.book { width: 100%; border-collapse: collapse; font-size: 14px; }
 .bad { color: var(--bad); }
 
 .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; padding: 12px 20px; font-size: 14px; box-shadow: 0 8px 30px rgb(0 0 0 / 0.5); max-width: 90vw; }
+
+.site-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; margin-top: 40px; padding: 20px 0 28px; border-top: 1px solid var(--border); text-align: center; font-size: 13px; }
+.site-footer .muted { font-size: 13px; }
+.gh-link { color: var(--muted); text-decoration: none; border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; font-size: 13px; transition: color 0.15s, border-color 0.15s; }
+.gh-link:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }

@@ -119,6 +119,18 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
   const stat = (text: string, live: boolean): HTMLElement =>
     el('span', { class: `stat ${live ? 'live' : 'off'}` }, text);
 
+  function footer(): HTMLElement {
+    return el('footer', { class: 'site-footer' },
+      el('span', { class: 'muted' }, 'BrowserSwaps — non-custodial BRC ⇄ USDT atomic swaps'),
+      el('a', {
+        class: 'gh-link',
+        href: 'https://github.com/swompythesecond/browserSwaps',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+      }, '↗ Source on GitHub'),
+    );
+  }
+
   // QR canvases are cached by content so background re-renders reuse the same
   // element instead of redrawing (and flickering) every few seconds.
   const qrCache = new Map<string, HTMLCanvasElement>();
@@ -939,6 +951,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       header(),
       tab === 'market' ? marketView() : tab === 'swaps' ? swapsView() : tab === 'history' ? historyView() : tab === 'developer' ? developerView() : settingsView(),
       getUsdtModal(),
+      footer(),
       toastMsg ? el('div', { class: 'toast' }, toastMsg) : '',
     );
 
