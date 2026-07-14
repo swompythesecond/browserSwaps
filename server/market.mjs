@@ -39,6 +39,26 @@ const MAX_BODY = 50_000;
 
 const boxIdOf = (key) => createHash('sha256').update(String(key)).digest('hex').slice(0, 20);
 
+// Real client IP for rate limiting. Behind the Apache reverse proxy every
+// request's socket peer is 127.0.0.1, which would bucket ALL users together.
+// Trust X-Forwarded-For only when the immediate peer IS loopback (i.e. our
+// Apache proxy). Apache is the edge and APPENDS the real client IP to any
+// header the client sent, so the trustworthy hop is the RIGHTMOST entry — a
+// client that forges "X-Forwarded-For: fake" just yields "fake, realIP" and we
+// still bucket them by realIP. A direct, non-proxied client uses its socket IP.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+function clientIp(req) {
+  const peer = req.socket.remoteAddress ?? '?';
+  if (LOOPBACK.has(peer)) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) {
+      const hops = String(xff).split(',');
+      return hops[hops.length - 1].trim() || peer;
+    }
+  }
+  return peer;
+}
+
 function json(res, code, body, cors) {
   res.writeHead(code, { 'content-type': 'application/json', ...cors });
   res.end(JSON.stringify(body));
@@ -165,7 +185,7 @@ export function createMarket(history = null) {
     handle(req, res, url, cors) {
       const isMarketPath = ['/offers', '/offers/delete', '/msg'].includes(url.pathname);
       if (!isMarketPath) return false;
-      const ip = req.socket.remoteAddress ?? '?';
+      const ip = clientIp(req);
       if (rateLimited(ip)) { res.writeHead(429, cors); res.end(); return true; }
 
       if (req.method === 'GET' && url.pathname === '/offers') {

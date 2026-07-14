@@ -25,6 +25,26 @@ import { createAutoRefill } from './autorefill.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+// Real client IP for rate limiting. Behind the Apache reverse proxy every
+// request's socket peer is 127.0.0.1, which would bucket ALL users together.
+// Trust X-Forwarded-For only when the immediate peer IS loopback (i.e. our
+// Apache proxy). Apache is the edge and APPENDS the real client IP to any
+// header the client sent, so the trustworthy hop is the RIGHTMOST entry — a
+// client that forges "X-Forwarded-For: fake" just yields "fake, realIP" and we
+// still bucket them by realIP. A direct, non-proxied client uses its socket IP.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+function clientIp(req) {
+  const peer = req.socket.remoteAddress ?? '?';
+  if (LOOPBACK.has(peer)) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) {
+      const hops = String(xff).split(',');
+      return hops[hops.length - 1].trim() || peer;
+    }
+  }
+  return peer;
+}
+
 function loadDotEnv() {
   try {
     return Object.fromEntries(
@@ -174,7 +194,7 @@ export function createRelayer() {
     handle(req, res, url, cors) {
       if (url.pathname !== '/relay') return false;
       if (req.method !== 'POST') { res.writeHead(404, cors); res.end(); return true; }
-      const ip = req.socket.remoteAddress ?? '?';
+      const ip = clientIp(req);
       if (rateLimited(ip)) { res.writeHead(429, cors); res.end('rate limited'); return true; }
       let raw = '';
       req.on('data', (c) => { raw += c; if (raw.length > 100_000) req.destroy(); });
