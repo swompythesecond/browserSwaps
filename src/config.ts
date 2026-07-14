@@ -67,13 +67,21 @@ export interface Settings {
 }
 
 export function loadSettings(): Settings {
+  // Default the helper server (orderbook + relayer) to the page's own origin so
+  // a hosted deployment works over HTTPS without mixed-content, and a `vite dev`
+  // checkout falls back to the local swapd on :9250. Users can override both in
+  // Settings.
+  const sameOrigin =
+    typeof location !== 'undefined' && location.protocol.startsWith('http')
+      ? location.origin
+      : 'http://localhost:9250';
   const defaults: Settings = {
     network: 'arbitrum',
     htlcAddress: '',
     tokenAddress: '',
     extraRpcs: [],
-    relayerUrls: ['http://localhost:9250'],
-    marketUrls: ['http://localhost:9250'],
+    relayerUrls: [sameOrigin],
+    marketUrls: [sameOrigin],
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
