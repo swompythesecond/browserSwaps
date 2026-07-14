@@ -39,6 +39,50 @@ node scripts/deploy-htlc.mjs arbitrumSepolia      # or: arbitrum
 
 Paste the printed contract address into **Settings → HTLC contract** (or bake it into `src/config.ts`). On Sepolia you'll also want to set a test ERC-20 as the token override.
 
+## Fees & the relayer (gas station)
+
+The relayer submits users' signed operations, pays the Arbitrum gas, and earns
+a **percentage cut in USDT** — so buyers and sellers never need ETH.
+
+- **Cut:** `RELAY.feeBps` in `src/config.ts` (default **0.4%**). A swap is two
+  relayed ops (the buyer's lock + the seller's claim), so the 0.4% is split
+  0.2% buyer-side + 0.2% seller-side — the *trade's* total cut is ~0.4%. A
+  gasless withdrawal is a single op and pays the full 0.4%.
+- **Floor:** every relayed op charges at least `RELAY.feeMinUnits` (default
+  0.03 USDT) so tiny trades still cover gas. The fee is `max(pct, floor)`.
+- Fees are pure client-computed values carried in the EIP-712 intents; changing
+  the rate needs **no contract redeploy**.
+
+Run it (combined market + relayer + history on one port):
+
+```bash
+set RELAYER_KEY=0x<64 hex>     # or put RELAYER_KEY / DEPLOYER_KEY in .env
+npm run server                 # http://localhost:9250
+```
+
+Fund the printed relayer address with a little ETH on Arbitrum One. The status
+endpoint (`GET /`) reports `relayer.ethBalance` and `lowGas`.
+
+### Auto-refill (USDT → ETH)
+
+The relayer earns USDT but spends ETH, so its ETH drains over time. Optional
+auto-refill swaps accumulated USDT back to ETH on Uniswap V3 when the balance
+runs low. It's **off by default** (it trades real funds); enable per-deployment:
+
+```bash
+set AUTOREFILL=on              # everything below is optional, with sane defaults
+set REFILL_MIN_ETH=0.0008      # top up when ETH dips below this
+set REFILL_TARGET_ETH=0.003    # ...back up to this
+set REFILL_MAX_USDT_UNITS=5000000   # cap per refill (5 USDT)
+set REFILL_SLIPPAGE_BPS=100    # 1% slippage tolerance (quote-checked)
+set REFILL_POOL_FEE=500        # Uniswap USDT/WETH fee tier (0.05%)
+```
+
+Each refill is capped, slippage-protected against a live Uniswap quote,
+rate-limited by a cooldown, and skipped (not executed blind) if the quote
+reverts. Keep `REFILL_MIN_ETH` above the gas cost of the approve+swap so a
+critically-empty relayer can still pay to refuel itself.
+
 ## Project layout
 
 ```
@@ -63,7 +107,6 @@ scripts/                  solc compile + deploy
 
 - Offers are sell-BRC only (buy-side offers/RFQs: next).
 - Both tabs must stay open for the swap's ~20 minutes; refunds require reopening the tab after the timelock (automatic once opened).
-- No relayer service yet for gasless USDT claims — sellers need a sliver of ETH.
 - Orderbook spam is only rate-limited by PeerJS connection count; no offer bonds yet.
 
 MIT

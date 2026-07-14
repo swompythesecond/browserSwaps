@@ -21,6 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createWalletClient, createPublicClient, http as viemHttp, formatEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { arbitrum } from 'viem/chains';
+import { createAutoRefill } from './autorefill.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,9 +61,23 @@ export function createRelayer() {
   const pk = process.env.RELAYER_KEY || dotenv.RELAYER_KEY || dotenv.DEPLOYER_KEY;
   if (!pk || !/^0x[0-9a-fA-F]{64}$/.test(pk)) return null;
 
+  /** USDT on Arbitrum One (matches src/config.ts). Used by auto-refill. */
+  const TOKEN = process.env.TOKEN_ADDRESS || dotenv.TOKEN_ADDRESS || '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9';
+
   const account = privateKeyToAccount(pk);
   const wallet = createWalletClient({ chain: arbitrum, account, transport: viemHttp(RPC) });
   const client = createPublicClient({ chain: arbitrum, transport: viemHttp(RPC) });
+
+  // Serialize every wallet send (relay ops AND auto-refill swaps) so two
+  // transactions can't grab the same nonce and clobber each other.
+  let txChain = Promise.resolve();
+  function exclusive(fn) {
+    const run = txChain.then(fn, fn);
+    txChain = run.then(() => {}, () => {});
+    return run;
+  }
+
+  const autorefill = createAutoRefill({ client, wallet, account, token: TOKEN, exclusive });
 
   let relayed = 0;
   let rejected = 0;
@@ -92,9 +107,11 @@ export function createRelayer() {
     if (feeUnits < MIN_FEE) throw new Error(`fee below relayer minimum (${MIN_FEE} units)`);
     // simulate first — a reverting op costs us gas for nothing
     await client.simulateContract({ address: HTLC, abi: artifact.abi, functionName, args, account });
-    const hash = await wallet.writeContract({ address: HTLC, abi: artifact.abi, functionName, args });
+    const hash = await exclusive(() => wallet.writeContract({ address: HTLC, abi: artifact.abi, functionName, args }));
     await client.waitForTransactionReceipt({ hash });
     relayed++;
+    // We just spent ETH on gas — opportunistically top it back up (never awaited).
+    void autorefill.maybeRefill();
     return hash;
   }
 
@@ -149,6 +166,7 @@ export function createRelayer() {
         address: account.address, ethBalance: formatEther(eth),
         minFeeUnits: MIN_FEE.toString(), htlc: HTLC, relayed, rejected,
         lowGas: eth < 200_000_000_000_000n, // < 0.0002 ETH: top me up
+        autorefill: autorefill.status(),
       };
     },
 

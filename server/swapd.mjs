@@ -18,7 +18,8 @@ import { createHistory } from './history.mjs';
 const PORT = Number(process.argv[process.argv.indexOf('--port') + 1] || 9250);
 
 const history = createHistory({
-  htlc: process.env.HTLC_ADDRESS || '0xdc6b492f5685829a8325ff407ba1cff21056bd89',
+  // v3 HTLC on Arbitrum One — MUST match src/config.ts and server/relayer.mjs.
+  htlc: process.env.HTLC_ADDRESS || '0xd9a5db57c4fc3b08381f0cd1816769eaed13ead7',
   rpc: process.env.RELAYER_RPC || 'https://arb1.arbitrum.io/rpc',
 });
 const market = createMarket(history);

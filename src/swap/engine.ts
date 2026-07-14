@@ -18,7 +18,7 @@ import type {
 } from './types.js';
 import { TERMINAL_STATES } from './types.js';
 import type { SwapStore } from './store.js';
-import { SWAP_TIMING, RELAY, MIN_TRADE_TOKEN } from '../config.js';
+import { SWAP_TIMING, MIN_TRADE_TOKEN, relayerFee, LOCK_FEE_BPS, CLAIM_FEE_BPS } from '../config.js';
 
 /** Peer hints the engine wants to send (delivered by the market layer). */
 export type OutboundHint =
@@ -98,7 +98,7 @@ export class SwapEngine {
     // because no funds have moved yet; if a lock somehow already exists we skip
     // this so the normal refund path can recover it.
     const amountToken = BigInt(swap.amountToken);
-    const minViable = RELAY.lockFeeUnits + RELAY.relayFeeUnits;
+    const minViable = relayerFee(amountToken, LOCK_FEE_BPS) + relayerFee(amountToken, CLAIM_FEE_BPS);
     if (amountToken <= minViable && !swap.evm.lockTxHash && !swap.brc.lockTxId
       && !TERMINAL_STATES.has(swap.state)) {
       this.fail(swap, `trade too small: ${amountToken} token units ≤ ${minViable} in fees`);

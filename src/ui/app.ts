@@ -2,7 +2,10 @@
  * Everything re-renders from live state on node/store/market events. */
 import type { Node } from '@bc/node.js';
 import type { PrivateKeyAccount } from 'viem/accounts';
-import { loadSettings, saveSettings, activeNetwork, EVM_NETWORKS, RELAY, MIN_TRADE_TOKEN, BRC_LOCK_FEE_DEFAULT, BRC_LOCK_FEE_MIN } from '../config.js';
+import { loadSettings, saveSettings, activeNetwork, EVM_NETWORKS, RELAY, MIN_TRADE_TOKEN, BRC_LOCK_FEE_DEFAULT, BRC_LOCK_FEE_MIN, relayerFee, maxSendable, LOCK_FEE_BPS, CLAIM_FEE_BPS, WITHDRAW_FEE_BPS } from '../config.js';
+
+/** Format basis points as a percent string, e.g. 40n -> "0.4%". */
+const fmtBps = (bps: bigint): string => `${Number(bps) / 100}%`;
 import type { MarketNetwork, HistoryTrade } from '../market/market.js';
 import type { SwapEngine } from '../swap/engine.js';
 import type { SwapStore } from '../swap/store.js';
@@ -287,11 +290,12 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       try {
         const usdt = parseUnits(priceIn.value || '0', net().tokenDecimals);
         if (brc > 0n && usdt > 0n) {
-          const receive = usdt > RELAY.relayFeeUnits ? usdt - RELAY.relayFeeUnits : 0n;
+          const relayFee = relayerFee(usdt, CLAIM_FEE_BPS);
+          const receive = usdt > relayFee ? usdt - relayFee : 0n;
           lines.push(
             `When it sells you receive ≈ ${formatUnits(receive, net().tokenDecimals, 2)} ${net().tokenSymbol} `
-            + `— the price minus a ${formatUnits(RELAY.relayFeeUnits, net().tokenDecimals, 2)} ${net().tokenSymbol} `
-            + 'relayer fee which pays the Arbitrum gas for you.');
+            + `— the price minus a ${formatUnits(relayFee, net().tokenDecimals, 2)} ${net().tokenSymbol} `
+            + `relayer fee (${fmtBps(CLAIM_FEE_BPS)}, min ${formatUnits(RELAY.feeMinUnits, net().tokenDecimals, 2)}) which pays the Arbitrum gas for you.`);
         }
       } catch { /* mid-typing */ }
       feeInfo.replaceChildren(...lines.map((t) => el('div', {}, t)));
@@ -316,7 +320,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         const fee = currentFee();
         feeIn.value = formatBrc(fee);
         if (brc <= 0n || usdt <= 0n) throw new Error('amounts must be positive');
-        if (usdt < MIN_TRADE_TOKEN) throw new Error(`minimum price is ${formatUnits(MIN_TRADE_TOKEN, net().tokenDecimals, 2)} ${net().tokenSymbol} — smaller trades get eaten by the ~0.10 ${net().tokenSymbol} network relayer fees`);
+        if (usdt < MIN_TRADE_TOKEN) throw new Error(`minimum price is ${formatUnits(MIN_TRADE_TOKEN, net().tokenDecimals, 2)} ${net().tokenSymbol} — smaller trades get eaten by the network relayer fees`);
         if (ctx.node.myBalance() < brc + fee) {
           throw new Error(`you need ${formatBrc(brc + fee)} BRC (amount + ${formatBrc(fee)} network fee) — you have ${formatBrc(ctx.node.myBalance())}`);
         }
@@ -387,8 +391,9 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         if (isMine) { ctx.market.cancelOffer(o.id); return; }
         if (!cfgReady) { toast('Configure the HTLC contract in Settings first.'); return; }
         if (usdt < MIN_TRADE_TOKEN) { toast(`This offer (${formatUnits(usdt, net().tokenDecimals, 2)} ${net().tokenSymbol}) is below the ${formatUnits(MIN_TRADE_TOKEN, net().tokenDecimals, 2)} ${net().tokenSymbol} minimum and can’t be filled.`); return; }
-        const needed = usdt + RELAY.lockFeeUnits;
-        if (!evmBalances.ok || evmBalances.token < needed) { toast(`You need ${formatUnits(needed, net().tokenDecimals, 2)} ${net().tokenSymbol} in your trading wallet (price + ~$0.05 network fee).`); return; }
+        const lockFee = relayerFee(usdt, LOCK_FEE_BPS);
+        const needed = usdt + lockFee;
+        if (!evmBalances.ok || evmBalances.token < needed) { toast(`You need ${formatUnits(needed, net().tokenDecimals, 2)} ${net().tokenSymbol} in your trading wallet (price + ${formatUnits(lockFee, net().tokenDecimals, 2)} network fee).`); return; }
         // Instant feedback: the maker's accept takes a second or two — the
         // button itself narrates that gap so the click never feels ignored.
         action.disabled = true;
@@ -406,7 +411,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         el('td', {}, formatBrc(brc)),
         el('td', {}, formatUnits(usdt, net().tokenDecimals, 2)),
         el('td', {}, price ? price.toFixed(6) : '—'),
-        el('td', {}, isMine ? '—' : `${formatUnits(usdt + RELAY.lockFeeUnits, net().tokenDecimals, 2)}`),
+        el('td', {}, isMine ? '—' : `${formatUnits(usdt + relayerFee(usdt, LOCK_FEE_BPS), net().tokenDecimals, 2)}`),
         el('td', { class: 'mono' }, isMine ? 'you' : short(o.maker.brcPubkey, 8)),
         el('td', {}, timeAgo(o.ts)),
         el('td', {}, action),
@@ -420,7 +425,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       ),
       offers.length ? table : el('p', { class: 'muted' }, 'No live offers right now. Offers appear here while their maker’s tab is online.'),
       el('p', { class: 'muted text-sm' },
-        `Buying: "You pay" = price + ${formatUnits(RELAY.lockFeeUnits, net().tokenDecimals, 2)} ${net().tokenSymbol} relayer fee — `
+        `Buying: "You pay" = price + a ${fmtBps(LOCK_FEE_BPS)} relayer fee (min ${formatUnits(RELAY.feeMinUnits, net().tokenDecimals, 2)} ${net().tokenSymbol}) — `
         + 'that fee pays ALL Arbitrum gas for you, so you never need ETH. You receive the BRC amount minus a 0.00001 BRC chain fee.'),
     ));
 
@@ -825,11 +830,11 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
   function withdrawTokenForm(): HTMLElement {
     const toIn = el('input', { class: 'input wide', placeholder: 'recipient Arbitrum address 0x…', 'data-keep': 'wd-usdt-to' }) as HTMLInputElement;
     const amtIn = el('input', { class: 'input', placeholder: `amount ${net().tokenSymbol}`, 'data-keep': 'wd-usdt-amt' }) as HTMLInputElement;
-    const fee = RELAY.withdrawFeeUnits;
+    const feeFor = (amt: bigint): bigint => relayerFee(amt, WITHDRAW_FEE_BPS);
     const maxBtn = el('button', { class: 'btn ghost', title: 'balance minus the relayer fee' }, 'Max') as HTMLButtonElement;
     maxBtn.onclick = () => {
-      if (evmBalances.ok && evmBalances.token > fee) {
-        amtIn.value = formatUnits(evmBalances.token - fee, net().tokenDecimals, net().tokenDecimals);
+      if (evmBalances.ok) {
+        amtIn.value = formatUnits(maxSendable(evmBalances.token, WITHDRAW_FEE_BPS), net().tokenDecimals, net().tokenDecimals);
       }
     };
     const sendBtn = el('button', { class: 'btn primary' }, `Withdraw ${net().tokenSymbol}`) as HTMLButtonElement;
@@ -842,6 +847,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
           if (!/^0x[0-9a-fA-F]{40}$/.test(to)) throw new Error('recipient must be a 0x… Arbitrum address');
           const amt = parseUnits(amtIn.value, net().tokenDecimals);
           if (amt <= 0n) throw new Error('amount must be positive');
+          const fee = feeFor(amt);
           if (evmBalances.ok && evmBalances.token < amt + fee) {
             throw new Error(`not enough ${net().tokenSymbol}: withdrawal needs the amount plus a ${formatUnits(fee, net().tokenDecimals, 2)} ${net().tokenSymbol} network fee`);
           }
@@ -857,7 +863,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     };
     return el('div', { class: 'col' },
       el('div', { class: 'label-sm' }, `${net().tokenSymbol} → any Arbitrum One address`),
-      el('p', { class: 'muted text-sm' }, `e.g. your exchange deposit address (exchange must support Arbitrum!). No ETH needed — a relayer pays the gas for a ${formatUnits(fee, net().tokenDecimals, 2)} ${net().tokenSymbol} fee.`),
+      el('p', { class: 'muted text-sm' }, `e.g. your exchange deposit address (exchange must support Arbitrum!). No ETH needed — a relayer pays the gas for a ${fmtBps(WITHDRAW_FEE_BPS)} fee (min ${formatUnits(RELAY.feeMinUnits, net().tokenDecimals, 2)} ${net().tokenSymbol}).`),
       toIn, el('div', { class: 'row' }, amtIn, maxBtn, sendBtn),
     );
   }

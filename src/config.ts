@@ -127,26 +127,54 @@ export const SWAP_TIMING = {
 
 // ---------------------------------------------------------------------------
 // Relaying (gasless UX). Fees are in token units (6 decimals for USDT).
-// A relayed op costs the relayer ~$0.01-0.03 of ETH gas; these fees make
-// running a relayer self-sustaining while staying invisible next to spreads.
+//
+// The relayer takes a PERCENTAGE cut, floored so a relayed op always covers
+// its ~$0.01-0.03 of Arbitrum gas. A swap is two relayed ops — the buyer's
+// lock and the seller's claim — so the headline 0.4% is split 0.2% + 0.2% to
+// make the *trade's* total cut ~0.4% (buyer pays lockFee, seller pays
+// relayFee). A withdrawal is a single op, so it pays the full 0.4%.
 // ---------------------------------------------------------------------------
 export const RELAY = {
-  /** Paid (in tokens, from the buyer) to whoever submits lockWithPermit. */
-  lockFeeUnits: 50_000n, // 0.05 USDT
-  /** Stored in each lock; paid to whoever relays the claim or refund. */
-  relayFeeUnits: 50_000n, // 0.05 USDT
-  /** Paid to whoever relays a gasless withdrawal. */
-  withdrawFeeUnits: 50_000n, // 0.05 USDT
+  /** Headline relayer cut, in basis points (40 = 0.4%). */
+  feeBps: 40n,
+  /** Per-op floor (token units): the smallest fee any single relayed op may
+   * charge, so tiny trades still cover gas + a thin margin. Keep it above the
+   * relayer server's MIN_FEE. */
+  feeMinUnits: 30_000n, // 0.03 USDT
   /** LockIntent / WithdrawIntent signatures expire after this long. */
   intentTtlSecs: 2 * 3600,
 } as const;
 
+/** Buyer-side share of a swap's cut (submits the lock). */
+export const LOCK_FEE_BPS = RELAY.feeBps / 2n; // 0.2%
+/** Seller-side share of a swap's cut (stored in the lock, paid on claim/refund). */
+export const CLAIM_FEE_BPS = RELAY.feeBps / 2n; // 0.2%
+/** Full cut on a gasless withdrawal (single relayed op). */
+export const WITHDRAW_FEE_BPS = RELAY.feeBps; // 0.4%
+
+/** Fee for one relayed op: `bps` of `amount`, floored to cover gas. */
+export function relayerFee(amount: bigint, bps: bigint): bigint {
+  const pct = (amount * bps) / 10_000n;
+  return pct > RELAY.feeMinUnits ? pct : RELAY.feeMinUnits;
+}
+
 /**
- * Minimum trade size (token units). Must exceed the total relayer fees
- * (lockFee + relayFee = 0.10 USDT) or the HTLC contract rejects the lock
- * ("relayFee >= amount") and the seller receives ~nothing. 0.30 USDT is the
- * floor: fees are a steep ~33% here (fine for testing / tiny trades), and
- * dilute toward negligible on larger trades.
+ * Largest amount you can send when the fee (`bps`, floored) is also drawn from
+ * `balance` — i.e. the biggest `amt` with `amt + relayerFee(amt, bps) <=
+ * balance`. Used by "Max"/"Sell all" so the total never exceeds the balance.
+ */
+export function maxSendable(balance: bigint, bps: bigint): bigint {
+  if (balance <= RELAY.feeMinUnits) return 0n;
+  const amtPct = (balance * 10_000n) / (10_000n + bps); // percentage regime
+  if ((amtPct * bps) / 10_000n >= RELAY.feeMinUnits) return amtPct;
+  return balance - RELAY.feeMinUnits; // floor regime
+}
+
+/**
+ * Minimum trade size (token units). Must comfortably exceed the seller's
+ * floored relayFee (else the HTLC contract rejects the lock, "relayFee >=
+ * amount"). At 0.30 USDT the fee is a steep ~20% (fine for testing / dust) and
+ * dilutes toward the 0.4% headline as trades grow.
  */
 export const MIN_TRADE_TOKEN = 300_000n; // 0.30 USDT
 

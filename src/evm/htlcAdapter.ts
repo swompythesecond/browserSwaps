@@ -19,7 +19,10 @@ import {
 } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import type { EvmAdapter, EvmLockView } from '../swap/types.js';
-import { RELAY, type EvmNetworkConfig } from '../config.js';
+import {
+  RELAY, relayerFee, LOCK_FEE_BPS, CLAIM_FEE_BPS, WITHDRAW_FEE_BPS,
+  type EvmNetworkConfig,
+} from '../config.js';
 import artifact from './htlc.artifact.json';
 
 const HTLC_ABI = artifact.abi;
@@ -136,7 +139,9 @@ export class HtlcEvmAdapter implements EvmAdapter {
     const chainId = (this.cfg.chain as Chain).id;
     const now = Math.floor(Date.now() / 1000);
     const deadline = BigInt(now + RELAY.intentTtlSecs);
-    const permitValue = p.amount + RELAY.lockFeeUnits;
+    const lockFee = relayerFee(p.amount, LOCK_FEE_BPS);
+    const relayFee = relayerFee(p.amount, CLAIM_FEE_BPS);
+    const permitValue = p.amount + lockFee;
 
     // 1. LockIntent signature (binds every parameter to us, the token payer)
     const intent = {
@@ -145,8 +150,8 @@ export class HtlcEvmAdapter implements EvmAdapter {
       hashlock: `0x${p.hashlock}` as `0x${string}`,
       recipient: p.recipient as `0x${string}`,
       timelock: BigInt(p.timelock),
-      lockFee: RELAY.lockFeeUnits,
-      relayFee: RELAY.relayFeeUnits,
+      lockFee,
+      relayFee,
       deadline,
     };
     const intentSig = await this.account.signTypedData({
@@ -227,7 +232,7 @@ export class HtlcEvmAdapter implements EvmAdapter {
       args: [
         this.cfg.token as `0x${string}`, p.amount,
         `0x${p.hashlock}` as `0x${string}`,
-        p.recipient as `0x${string}`, BigInt(p.timelock), RELAY.relayFeeUnits,
+        p.recipient as `0x${string}`, BigInt(p.timelock), relayerFee(p.amount, CLAIM_FEE_BPS),
       ],
     });
     await this.primary.waitForTransactionReceipt({ hash: txHash });
@@ -320,7 +325,7 @@ export class HtlcEvmAdapter implements EvmAdapter {
     const chainId = (this.cfg.chain as Chain).id;
     const now = Math.floor(Date.now() / 1000);
     const deadline = BigInt(now + RELAY.intentTtlSecs);
-    const fee = RELAY.withdrawFeeUnits;
+    const fee = relayerFee(amount, WITHDRAW_FEE_BPS);
     const permitValue = amount + fee;
     const salt = `0x${Array.from(crypto.getRandomValues(new Uint8Array(32))).map((b) => b.toString(16).padStart(2, '0')).join('')}` as `0x${string}`;
 
