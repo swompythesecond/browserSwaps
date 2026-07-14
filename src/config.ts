@@ -140,7 +140,8 @@ export const SWAP_TIMING = {
 // its ~$0.01-0.03 of Arbitrum gas. A swap is two relayed ops — the buyer's
 // lock and the seller's claim — so the headline 0.4% is split 0.2% + 0.2% to
 // make the *trade's* total cut ~0.4% (buyer pays lockFee, seller pays
-// relayFee). A withdrawal is a single op, so it pays the full 0.4%.
+// relayFee). Withdrawals are NOT monetized: they charge 0 bps, so the fee
+// falls through to the flat per-op floor that just covers gas.
 // ---------------------------------------------------------------------------
 export const RELAY = {
   /** Headline relayer cut, in basis points (40 = 0.4%). */
@@ -157,8 +158,8 @@ export const RELAY = {
 export const LOCK_FEE_BPS = RELAY.feeBps / 2n; // 0.2%
 /** Seller-side share of a swap's cut (stored in the lock, paid on claim/refund). */
 export const CLAIM_FEE_BPS = RELAY.feeBps / 2n; // 0.2%
-/** Full cut on a gasless withdrawal (single relayed op). */
-export const WITHDRAW_FEE_BPS = RELAY.feeBps; // 0.4%
+/** Gasless withdrawals only cover gas: 0 bps -> flat `feeMinUnits` fee. */
+export const WITHDRAW_FEE_BPS = 0n;
 
 /** Fee for one relayed op: `bps` of `amount`, floored to cover gas. */
 export function relayerFee(amount: bigint, bps: bigint): bigint {

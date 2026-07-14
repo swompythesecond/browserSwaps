@@ -863,7 +863,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     };
     return el('div', { class: 'col' },
       el('div', { class: 'label-sm' }, `${net().tokenSymbol} → any Arbitrum One address`),
-      el('p', { class: 'muted text-sm' }, `e.g. your exchange deposit address (exchange must support Arbitrum!). No ETH needed — a relayer pays the gas for a ${fmtBps(WITHDRAW_FEE_BPS)} fee (min ${formatUnits(RELAY.feeMinUnits, net().tokenDecimals, 2)} ${net().tokenSymbol}).`),
+      el('p', { class: 'muted text-sm' }, `e.g. your exchange deposit address (exchange must support Arbitrum!). No ETH needed — a relayer pays the gas for a flat ${formatUnits(relayerFee(0n, WITHDRAW_FEE_BPS), net().tokenDecimals, 2)} ${net().tokenSymbol} fee.`),
       toIn, el('div', { class: 'row' }, amtIn, maxBtn, sendBtn),
     );
   }
