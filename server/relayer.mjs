@@ -49,8 +49,11 @@ export function createRelayer() {
   const artifact = JSON.parse(fs.readFileSync(path.join(here, '../src/evm/htlc.artifact.json'), 'utf8'));
   const dotenv = loadDotEnv();
   const RPC = process.env.RELAYER_RPC || 'https://arb1.arbitrum.io/rpc';
-  /** HTLC v2 on Arbitrum One (matches src/config.ts). */
-  const HTLC = process.env.HTLC_ADDRESS || '0xdc6b492f5685829a8325ff407ba1cff21056bd89';
+  /** HTLC v3 on Arbitrum One — MUST match src/config.ts EVM_NETWORKS.arbitrum.htlc.
+   * If this drifts from what the app signs against, every relayed op reverts
+   * (the EIP-712 intent signature is bound to the verifying contract address). */
+  const HTLC = (process.env.HTLC_ADDRESS || '0xd9a5db57c4fc3b08381f0cd1816769eaed13ead7').toLowerCase();
+  console.log(`[relayer] HTLC contract: ${HTLC}`);
   /** Minimum fee (token units, 6 decimals) an op must pay us. */
   const MIN_FEE = BigInt(process.env.MIN_FEE_UNITS || '20000'); // 0.02 USDT
 

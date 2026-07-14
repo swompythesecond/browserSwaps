@@ -291,10 +291,20 @@ export class HtlcEvmAdapter implements EvmAdapter {
   /** Gasless withdrawal: sign a WithdrawIntent + permit, hand to a relayer.
    * Falls back to a self-submitted transfer (needs ETH) if no relayer answers. */
   async withdraw(to: string, amount: bigint): Promise<string> {
+    let relayError: string;
     try {
       return await this.relayedWithdraw(to, amount);
     } catch (e) {
-      console.warn('relayed withdrawal unavailable, self-submitting:', (e as Error).message);
+      relayError = (e as Error).message;
+      console.warn('relayed withdrawal unavailable:', relayError);
+    }
+    // The gasless relayer is the product promise ("no ETH needed"). Only self-
+    // submit a direct transfer if the wallet actually has ETH for gas —
+    // otherwise it's guaranteed to fail with a confusing "insufficient funds"
+    // error that hides the real relayer problem.
+    const eth = await this.primary.getBalance({ address: this.account.address }).catch(() => 0n);
+    if (eth < 100_000_000_000_000n) { // < 0.0001 ETH: can't self-submit
+      throw new Error(`the relayer couldn't process your gasless withdrawal (${relayError}). Your funds are safe — try again in a moment, or ask the operator to check the relayer.`);
     }
     const txHash = await this.wallet.writeContract({
       chain: this.cfg.chain as Chain, account: this.account,
