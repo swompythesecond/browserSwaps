@@ -127,6 +127,13 @@ table.book { width: 100%; border-collapse: collapse; font-size: 14px; }
 .orderbook { display: flex; flex-direction: column; margin-top: 8px; }
 .ob-head, .ob-row { display: grid; grid-template-columns: minmax(96px, 1.1fr) 1fr 1fr 64px; gap: 10px; align-items: center; }
 .ob-head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 10px 8px; border-bottom: 1px solid var(--border); }
+.ob-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.ob-sort:hover { color: var(--text); }
+.ob-sort.active { color: var(--text); }
+.ob-pager { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 5px 0; font-size: 11px; }
+.ob-page-btn { min-width: 26px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-size: 13px; line-height: 1.2; }
+.ob-page-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ob-page-btn:disabled { opacity: 0.4; cursor: default; }
 .ob-row { padding: 7px 10px; border-radius: 7px; font-size: 13px; font-variant-numeric: tabular-nums; cursor: pointer; border: 1px solid transparent; }
 .ob-row:hover { border-color: var(--border); }
 .ob-row .price { font-weight: 600; }

@@ -119,6 +119,30 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
   // the user typed).
   let fillConfirming = false;
   let fillAmountBrc: bigint | null = null;
+  // Order-book sort. 'price' keeps the classic exchange layout (asks
+  // priciest-first above the spread, bids highest-first below); 'amount' and
+  // 'total' re-sort both sides by size. Persisted so the choice survives
+  // re-renders and reloads. Depth bars and the spread stay price-based.
+  type BookSortKey = 'price' | 'amount' | 'total';
+  let bookSort: { key: BookSortKey; dir: 'asc' | 'desc' } = (() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('bswap.booksort.v1') ?? 'null');
+      if (s && ['price', 'amount', 'total'].includes(s.key) && ['asc', 'desc'].includes(s.dir)) return s;
+    } catch { /* fall through to default */ }
+    return { key: 'price', dir: 'desc' };
+  })();
+  // Order-book pagination: at most this many rows per side; separate page index
+  // per side. Page position is per-session (not persisted) and resets whenever
+  // the sort or the pair changes so you're never stranded on a stale page.
+  const BOOK_PAGE_SIZE = 12;
+  let bookPage = { ask: 0, bid: 0 };
+  const setBookSort = (key: BookSortKey): void => {
+    // Same column → flip direction; new column → start descending (big/pricey first).
+    bookSort = { key, dir: bookSort.key === key && bookSort.dir === 'desc' ? 'asc' : 'desc' };
+    bookPage = { ask: 0, bid: 0 };
+    localStorage.setItem('bswap.booksort.v1', JSON.stringify(bookSort));
+    render();
+  };
   // Active trading pair (market tab shows one pair's book at a time).
   let marketPair = PAIRS[localStorage.getItem('bswap.pair.v1') ?? ''] ? localStorage.getItem('bswap.pair.v1')! : UI_DEFAULT_PAIR;
   // Foreign-chain balances per pair: token units + native gas coin (wei/lamports).
@@ -368,6 +392,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       );
       row.onclick = () => {
         marketPair = p.key;
+        bookPage = { ask: 0, bid: 0 };
         localStorage.setItem('bswap.pair.v1', p.key);
         render();
       };
@@ -680,6 +705,61 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     for (let i = 0; i < bids.length; i++) { acc += bids[i]!.total; bidCum[i] = acc; }
     const maxCum = (askMax > acc ? askMax : acc) || 1n;
 
+    // Depth is a price concept (cumulative liquidity out from the spread), so
+    // keep it keyed by offer even when the rows are displayed in another order.
+    const cumById = new Map<string, bigint>();
+    asks.forEach((r, i) => cumById.set(r.offer.id, askCum[i]!));
+    bids.forEach((r, i) => cumById.set(r.offer.id, bidCum[i]!));
+    // Display order per the active sort. Both sides share the comparator; for
+    // key='price' dir='desc' this reproduces the canonical layout exactly.
+    const sortVal = (r: BookRow): number =>
+      bookSort.key === 'amount' ? Number(r.remaining)
+      : bookSort.key === 'total' ? Number(r.total)
+      : r.price;
+    const cmp = (a: BookRow, b: BookRow): number =>
+      (bookSort.dir === 'asc' ? 1 : -1) * (sortVal(a) - sortVal(b));
+    const asksView = [...asks].sort(cmp);
+    const bidsView = [...bids].sort(cmp);
+
+    // Pagination. Asks render priciest-first (cheapest touches the spread), so
+    // when sorted by price we page them from the spread outward — page 0 holds
+    // the best (spread-adjacent) asks. Bids already lead with the best bid, and
+    // any non-price sort just pages top-down. Page index is clamped every render
+    // so a shrinking book can't strand you past the last page.
+    const pageOf = (arr: BookRow[], page: number, fromEnd: boolean) => {
+      const pages = Math.max(1, Math.ceil(arr.length / BOOK_PAGE_SIZE));
+      const p = Math.min(Math.max(0, page), pages - 1);
+      const end = fromEnd ? arr.length - p * BOOK_PAGE_SIZE : Math.min(arr.length, (p + 1) * BOOK_PAGE_SIZE);
+      const start = fromEnd ? Math.max(0, end - BOOK_PAGE_SIZE) : p * BOOK_PAGE_SIZE;
+      return { rows: arr.slice(start, end), p, pages };
+    };
+    const askPaged = pageOf(asksView, bookPage.ask, bookSort.key === 'price');
+    const bidPaged = pageOf(bidsView, bookPage.bid, false);
+    const pager = (side: 'ask' | 'bid', p: number, pages: number): globalThis.Node => {
+      if (pages <= 1) return document.createDocumentFragment();
+      const btn = (label: string, to: number, disabled: boolean): HTMLButtonElement => {
+        const b = el('button', { class: 'ob-page-btn' }, label) as HTMLButtonElement;
+        b.disabled = disabled;
+        b.onclick = () => { bookPage[side] = to; render(); };
+        return b;
+      };
+      return el('div', { class: 'ob-pager' },
+        btn('‹', p - 1, p <= 0),
+        el('span', { class: 'muted' }, `${p + 1}/${pages}`),
+        btn('›', p + 1, p >= pages - 1),
+      );
+    };
+    // Clickable column headers: click to sort, click again to flip direction.
+    const headCell = (key: BookSortKey, label: string): HTMLElement => {
+      const arrow = bookSort.key !== key ? '' : bookSort.dir === 'asc' ? ' ↑' : ' ↓';
+      const span = el('span', {
+        class: `ob-sort${bookSort.key === key ? ' active' : ''}`,
+        title: `Sort by ${(label.split(' ')[0] ?? label).toLowerCase()}`,
+      }, label + arrow);
+      span.onclick = () => setBookSort(key);
+      return span;
+    };
+
     const obRow = (r: BookRow, cum: bigint): HTMLElement => {
       const isAsk = r.offer.side === 'sell-brc';
       const pct = Number((cum * 100n) / maxCum);
@@ -729,16 +809,18 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       ),
       el('div', { class: 'orderbook' },
         el('div', { class: 'ob-head' },
-          el('span', {}, `Price ${sym}/BRC`), el('span', {}, 'Amount BRC'),
-          el('span', {}, `Total ${sym}`), el('span', {}),
+          headCell('price', `Price ${sym}/BRC`), headCell('amount', 'Amount BRC'),
+          headCell('total', `Total ${sym}`), el('span', {}),
         ),
+        pager('ask', askPaged.p, askPaged.pages),
         asks.length
-          ? el('div', {}, ...asks.map((r, i) => obRow(r, askCum[i]!)))
+          ? el('div', {}, ...askPaged.rows.map((r) => obRow(r, cumById.get(r.offer.id)!)))
           : el('div', { class: 'ob-empty' }, 'No sell offers — yours could be the first.'),
         el('div', { class: 'ob-spread' }, ...spreadParts),
         bids.length
-          ? el('div', {}, ...bids.map((r, i) => obRow(r, bidCum[i]!)))
+          ? el('div', {}, ...bidPaged.rows.map((r) => obRow(r, cumById.get(r.offer.id)!)))
           : el('div', { class: 'ob-empty' }, 'No buy offers — yours could be the first.'),
+        pager('bid', bidPaged.p, bidPaged.pages),
       ),
       el('p', { class: 'muted text-sm' },
         'Click a red row to buy that maker’s BRC, a green row to sell into their bid — any amount worth at least '
