@@ -16,9 +16,14 @@
 import type {
   BrcAdapter, Clock, EvmAdapter, SwapRecord, SwapState,
 } from './types.js';
-import { TERMINAL_STATES } from './types.js';
+import { TERMINAL_STATES, foreignAddressOf } from './types.js';
 import type { SwapStore } from './store.js';
-import { SWAP_TIMING, MIN_TRADE_TOKEN, relayerFee, LOCK_FEE_BPS, CLAIM_FEE_BPS } from '../config.js';
+import { SWAP_TIMING, relayerFee, LOCK_FEE_BPS, CLAIM_FEE_BPS, pairConfig } from '../config.js';
+
+/** Resolve the foreign-chain adapter for a swap's pair (undefined = the
+ * legacy default pair, arb:usdt). One adapter instance per configured pair;
+ * both the EVM and the Solana HTLC adapters implement the same interface. */
+export type ForeignAdapters = (pair: string | undefined) => EvmAdapter;
 
 /** Peer hints the engine wants to send (delivered by the market layer). */
 export type OutboundHint =
@@ -30,7 +35,7 @@ export class SwapEngine {
   private ticking = new Set<string>();
 
   constructor(
-    private readonly evm: EvmAdapter,
+    private readonly foreign: ForeignAdapters,
     private readonly brc: BrcAdapter,
     private readonly store: SwapStore,
     private readonly sendHint: (peerId: string, hint: OutboundHint) => void,
@@ -98,7 +103,8 @@ export class SwapEngine {
     // because no funds have moved yet; if a lock somehow already exists we skip
     // this so the normal refund path can recover it.
     const amountToken = BigInt(swap.amountToken);
-    const minViable = relayerFee(amountToken, LOCK_FEE_BPS) + relayerFee(amountToken, CLAIM_FEE_BPS);
+    const floor = pairConfig(swap.pair).feeMinUnits;
+    const minViable = relayerFee(amountToken, LOCK_FEE_BPS, floor) + relayerFee(amountToken, CLAIM_FEE_BPS, floor);
     if (amountToken <= minViable && !swap.evm.lockTxHash && !swap.brc.lockTxId
       && !TERMINAL_STATES.has(swap.state)) {
       this.fail(swap, `trade too small: ${amountToken} token units ≤ ${minViable} in fees`);
@@ -120,13 +126,27 @@ export class SwapEngine {
 
   private async stepBuyer(swap: SwapRecord): Promise<void> {
     const now = this.now();
+    const evm = this.foreign(swap.pair);
+    const chain = pairConfig(swap.pair).chain;
+    const sym = pairConfig(swap.pair).tokenSymbol;
     switch (swap.state) {
+      case 'awaiting-confirm': {
+        // Maker-buyer only: we accepted a take but have locked NOTHING yet. The
+        // market layer flips us to 'init' the instant the taker's confirm lands.
+        // If it never comes — the taker gave up or went offline — cancel cleanly.
+        // No funds are at risk precisely because nothing has been locked.
+        if (now - swap.createdAt > SWAP_TIMING.confirmTimeoutSecs) {
+          this.fail(swap, 'the other side never confirmed — cancelled safely, no funds were locked');
+        }
+        return;
+      }
+
       case 'init': {
         // Lock id is deterministic, so compute it before sending anything —
         // recovery after a crash mid-send is then a simple on-chain lookup.
-        const lockId = this.evm.computeLockId({
-          sender: swap.self.evmAddress,
-          recipient: swap.counterparty.evmAddress,
+        const lockId = evm.computeLockId({
+          sender: foreignAddressOf(swap.self, chain),
+          recipient: foreignAddressOf(swap.counterparty, chain),
           token: '', // adapter fills its configured token
           amount: BigInt(swap.amountToken),
           hashlock: swap.hashlock,
@@ -137,15 +157,15 @@ export class SwapEngine {
       }
 
       case 'evm-locking': {
-        const existing = swap.evm.lockId ? await this.evm.getLock(swap.evm.lockId) : null;
+        const existing = swap.evm.lockId ? await evm.getLock(swap.evm.lockId) : null;
         if (existing) {
           this.move(swap, 'evm-locked');
           return;
         }
-        const { lockId, txHash } = await this.evm.lock({
+        const { lockId, txHash } = await evm.lock({
           amount: BigInt(swap.amountToken),
           hashlock: swap.hashlock,
-          recipient: swap.counterparty.evmAddress,
+          recipient: foreignAddressOf(swap.counterparty, chain),
           timelock: swap.evmTimelock,
         });
         this.move(swap, 'evm-locked', { evm: { ...swap.evm, lockId, lockTxHash: txHash } });
@@ -175,7 +195,7 @@ export class SwapEngine {
           && lock.confirmations >= SWAP_TIMING.brcConfirmations) {
           if (now >= claimDeadline) {
             // Too close to the seller's refund window — do NOT reveal the secret.
-            this.move(swap, 'refunding', { note: 'BRC lock confirmed too late; refunding USDT' });
+            this.move(swap, 'refunding', { note: `BRC lock confirmed too late; refunding ${sym}` });
             return;
           }
           this.move(swap, 'brc-claiming', {
@@ -212,7 +232,7 @@ export class SwapEngine {
 
       case 'refunding': {
         if (now < swap.evmTimelock) return; // wait out the contract timelock
-        const view = swap.evm.lockId ? await this.evm.getLock(swap.evm.lockId) : null;
+        const view = swap.evm.lockId ? await evm.getLock(swap.evm.lockId) : null;
         if (view?.refunded || !view) {
           this.move(swap, 'refunded');
           return;
@@ -223,7 +243,7 @@ export class SwapEngine {
           this.fail(swap, 'USDT claimed by counterparty — inspect this swap');
           return;
         }
-        const refundTxHash = await this.evm.refund(swap.evm.lockId!);
+        const refundTxHash = await evm.refund(swap.evm.lockId!);
         this.move(swap, 'refunded', { evm: { ...swap.evm, refundTxHash } });
         return;
       }
@@ -235,11 +255,14 @@ export class SwapEngine {
 
   private async stepSeller(swap: SwapRecord): Promise<void> {
     const now = this.now();
+    const evm = this.foreign(swap.pair);
+    const chain = pairConfig(swap.pair).chain;
+    const sym = pairConfig(swap.pair).tokenSymbol;
     switch (swap.state) {
       case 'init': {
-        const lockId = this.evm.computeLockId({
-          sender: swap.counterparty.evmAddress,
-          recipient: swap.self.evmAddress,
+        const lockId = evm.computeLockId({
+          sender: foreignAddressOf(swap.counterparty, chain),
+          recipient: foreignAddressOf(swap.self, chain),
           token: '',
           amount: BigInt(swap.amountToken),
           hashlock: swap.hashlock,
@@ -250,7 +273,7 @@ export class SwapEngine {
       }
 
       case 'awaiting-evm-lock': {
-        const view = await this.evm.getLock(swap.evm.lockId!);
+        const view = await evm.getLock(swap.evm.lockId!);
         if (!view) {
           // Give the buyer 30 minutes to fund; we have committed nothing yet.
           if (now - swap.createdAt > 1800) this.fail(swap, 'buyer never locked USDT');
@@ -306,13 +329,13 @@ export class SwapEngine {
       }
 
       case 'evm-claiming': {
-        const view = await this.evm.getLock(swap.evm.lockId!);
+        const view = await evm.getLock(swap.evm.lockId!);
         if (view?.claimed) {
-          this.move(swap, 'done', { note: 'USDT received' });
+          this.move(swap, 'done', { note: `${sym} received` });
           return;
         }
-        const claimTxHash = await this.evm.claim(swap.evm.lockId!, swap.secret!);
-        this.move(swap, 'done', { evm: { ...swap.evm, claimTxHash }, note: 'USDT received' });
+        const claimTxHash = await evm.claim(swap.evm.lockId!, swap.secret!);
+        this.move(swap, 'done', { evm: { ...swap.evm, claimTxHash }, note: `${sym} received` });
         return;
       }
 

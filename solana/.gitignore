@@ -1,0 +1,8 @@
+.anchor/
+target/
+node_modules/
+test-ledger/
+yarn.lock
+package-lock.json
+.devnet-deployer.json
+.gas-reserve.json

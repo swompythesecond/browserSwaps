@@ -19,6 +19,9 @@ export type SwapRole = 'buyer' | 'seller';
 export type SwapState =
   // shared
   | 'init'
+  // maker-buyer only: accepted a take, waiting for the taker's confirm before
+  // locking anything (so it never commits funds against a taker that gave up)
+  | 'awaiting-confirm'
   // buyer path
   | 'evm-locking'        // sending approve + lock on Arbitrum
   | 'evm-locked'         // our USDT is escrowed; told the seller
@@ -42,13 +45,25 @@ export interface SwapParty {
   brcPubkey: string;
   /** EVM address on Arbitrum. */
   evmAddress: string;
+  /** Solana address, base58. Present on sol:* pair swaps. */
+  solAddress?: string;
   /** Market PeerJS id, for the in-swap message channel. */
   peerId: string;
 }
 
+/** The party's address on the pair's foreign chain. */
+export function foreignAddressOf(party: SwapParty, chain: 'evm' | 'sol'): string {
+  return chain === 'evm' ? party.evmAddress : (party.solAddress ?? '');
+}
+
 export interface SwapRecord {
   id: string;                // uuid
+  /** Trading pair (config PAIRS key). Absent = 'arb:usdt' (pre-pair records). */
+  pair?: string;
   role: SwapRole;
+  /** Whether this swap filled OUR offer ('maker') or we took someone else's
+   * ('taker'). Purely informational (UI notifications); role decides logic. */
+  origin?: 'maker' | 'taker';
   offerId: string;
   createdAt: number;         // unix seconds
   updatedAt: number;
@@ -68,8 +83,11 @@ export interface SwapRecord {
   evmTimelock: number;
   brcLocktime: number;
 
+  /** Foreign-chain escrow refs. Named `evm` for localStorage compatibility,
+   * but sol:* pair swaps store their Solana refs here too: lockId is the
+   * lock-state PDA (base58) and the hashes are transaction signatures. */
   evm: {
-    lockId?: string;         // 0x… deterministic id in the HTLC contract
+    lockId?: string;         // EVM: 0x… deterministic id; SOL: lock PDA base58
     lockTxHash?: string;
     claimTxHash?: string;
     refundTxHash?: string;
@@ -87,9 +105,11 @@ export interface SwapRecord {
   note?: string;
 }
 
-/** On-chain view of an HTLC contract lock, as verified across RPCs. */
+/** On-chain view of an HTLC lock, as verified across RPCs. Chain-agnostic:
+ * the EVM adapter reads the contract mapping, the Solana adapter the lock
+ * PDA's account state. */
 export interface EvmLockView {
-  token: string;
+  token: string;             // ERC-20 address / SPL mint
   sender: string;
   recipient: string;
   amount: bigint;
@@ -97,7 +117,8 @@ export interface EvmLockView {
   timelock: number;          // unix seconds
   claimed: boolean;
   refunded: boolean;
-  /** True when the lock is also visible at the `safe` (L1-posted) block tag. */
+  /** Strong-finality flag: EVM = visible at the `safe` (L1-posted) block tag,
+   * Solana = visible at `finalized` commitment. */
   safe: boolean;
   /** Seconds since the RPCs' latest block timestamp saw the lock (age proxy). */
   ageSecs: number;

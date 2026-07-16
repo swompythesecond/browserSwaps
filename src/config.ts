@@ -52,6 +52,119 @@ export const EVM_NETWORKS: Record<string, EvmNetworkConfig> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Solana networks. Same trust rule as EVM: lock verification cross-checks all
+// reachable RPCs and requires agreement; `finalized` commitment replaces the
+// EVM `safe` tag for large swaps.
+// ---------------------------------------------------------------------------
+export interface SolNetworkConfig {
+  key: string;
+  /** Deployed bswap-htlc program id (base58). Empty = not deployed yet. */
+  htlcProgram: string;
+  rpcs: string[];
+}
+
+export const SOL_NETWORKS: Record<string, SolNetworkConfig> = {
+  solana: {
+    key: 'solana',
+    // bswap-htlc, deployed to mainnet-beta 2026-07-15,
+    // tx 62zB2bRb4wAU7BEe6Mf2ETmpzwDcN7DxagUmMmFZNEkf3NAosEFz6PgLwJNbgdgcqB8j9cpeWtziuyuhHjLmtFqH
+    htlcProgram: 'BgonehyDwfg8UtUKQW5TkYLAvFnJ47BRXu1TLYaDZ1dV',
+    // Browser-usable direct RPC. Public Solana endpoints are a CORS minefield:
+    // most reject the request because @solana/web3.js sends a non-standard
+    // `solana-client` header (we strip it in the adapter), and even then many
+    // don't return Access-Control-Allow-Headers at all. publicnode is the one
+    // reliable keyless endpoint (answers the preflight, allows content-type).
+    // A second INDEPENDENT source for the getLock quorum comes from the app's
+    // own same-origin `/sol-rpc` passthrough, prepended in activeSolNetwork()
+    // (no CORS — same origin — and it reaches api.mainnet-beta server-side,
+    // which works fine off-browser). Users can add more in Settings.
+    rpcs: [
+      'https://solana-rpc.publicnode.com',
+    ],
+  },
+  solanaDevnet: {
+    key: 'solanaDevnet',
+    // Deployed 2026-07-15, tx 4K7Z6fJh7mAic93DdLG9oewAPDUNXVz2S9cWBW5TpdJPVS2iWLhGzQw2WwVp4WGVUGCbMt39nk1TAsYYMfzSFkhG
+    htlcProgram: 'BgonehyDwfg8UtUKQW5TkYLAvFnJ47BRXu1TLYaDZ1dV',
+    rpcs: [
+      'https://api.devnet.solana.com',
+    ],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Trading pairs. Every market is BRC against one token on one foreign chain;
+// a pair pins down the chain adapter, token contract/mint, decimals, and the
+// two DECIMAL-SENSITIVE amounts: the minimum trade size and the flat per-op
+// relayer-fee floor. The percentage fees (0.4%) are decimal-agnostic, but a
+// flat floor is meaningless without knowing the token's units — so both live
+// here per pair instead of as global constants.
+// ---------------------------------------------------------------------------
+export type ChainKind = 'evm' | 'sol';
+
+export interface PairConfig {
+  key: string;          // 'arb:usdt' — wire format in offers and swap records
+  chain: ChainKind;
+  network: string;      // key into EVM_NETWORKS / SOL_NETWORKS
+  label: string;        // UI: 'USDT · Arbitrum'
+  tokenSymbol: string;
+  tokenDecimals: number;
+  /** How many decimals the UI shows for amounts of this token. */
+  displayDecimals: number;
+  /** Minimum trade size (token units) — must comfortably exceed 2x the fee
+   * floor or the fees eat the trade (the HTLC rejects relayFee >= amount). */
+  minTradeUnits: bigint;
+  /** Flat floor (token units) for one relayed op's fee; the percentage fee
+   * never drops below this. Keep it above the relayer server's per-mint min. */
+  feeMinUnits: bigint;
+  /** SPL mint (sol pairs only); EVM pairs take the token from the network.
+   * Native SOL trades as wrapped SOL (the So111…1112 mint) — the adapter
+   * wraps/unwraps transparently, users only ever see native SOL. */
+  mint?: string;
+}
+
+// Listed in DISPLAY ORDER (the Markets table renders top-to-bottom from
+// here): Solana first — it's what most users asked for.
+export const PAIRS: Record<string, PairConfig> = {
+  'sol:sol': {
+    key: 'sol:sol', chain: 'sol', network: 'solana',
+    label: 'SOL · Solana', tokenSymbol: 'SOL', tokenDecimals: 9,
+    // SOL is volatile — these floors are ~$0.30 / ~$0.012 at $60/SOL and
+    // should be revisited if the price moves a lot.
+    displayDecimals: 4, minTradeUnits: 5_000_000n /* 0.005 SOL */, feeMinUnits: 200_000n /* 0.0002 SOL */,
+    mint: 'So11111111111111111111111111111111111111112', // wrapped SOL
+  },
+  'sol:usdc': {
+    key: 'sol:usdc', chain: 'sol', network: 'solana',
+    label: 'USDC · Solana', tokenSymbol: 'USDC', tokenDecimals: 6,
+    displayDecimals: 2, minTradeUnits: 300_000n, feeMinUnits: 30_000n,
+    mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  },
+  'sol:usdt': {
+    key: 'sol:usdt', chain: 'sol', network: 'solana',
+    label: 'USDT · Solana', tokenSymbol: 'USDT', tokenDecimals: 6,
+    displayDecimals: 2, minTradeUnits: 300_000n, feeMinUnits: 30_000n,
+    mint: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+  },
+  'arb:usdt': {
+    key: 'arb:usdt', chain: 'evm', network: 'arbitrum',
+    label: 'USDT · Arbitrum', tokenSymbol: 'USDT', tokenDecimals: 6,
+    displayDecimals: 2, minTradeUnits: 300_000n /* 0.30 */, feeMinUnits: 30_000n /* 0.03 */,
+  },
+};
+
+/** Pair every v1 offer and pre-pair swap record implicitly traded — a WIRE
+ * PROTOCOL constant, not a display preference (see UI_DEFAULT_PAIR). */
+export const DEFAULT_PAIR = 'arb:usdt';
+
+/** The book a fresh visitor lands on. */
+export const UI_DEFAULT_PAIR = 'sol:sol';
+
+export function pairConfig(key: string | undefined): PairConfig {
+  return PAIRS[key ?? DEFAULT_PAIR] ?? PAIRS[DEFAULT_PAIR]!;
+}
+
 const SETTINGS_KEY = 'bswap.settings.v1';
 
 export interface Settings {
@@ -60,6 +173,9 @@ export interface Settings {
   htlcAddress: string;
   tokenAddress: string;
   extraRpcs: string[];
+  /** Solana overrides: HTLC program id + extra RPCs for the quorum. */
+  solProgramId: string;
+  extraSolRpcs: string[];
   /** Relayer ("gas station") endpoints; tried in order, self-submit fallback. */
   relayerUrls: string[];
   /** Market servers (orderbook + handshake mailboxes); writes fan out to all. */
@@ -80,6 +196,8 @@ export function loadSettings(): Settings {
     htlcAddress: '',
     tokenAddress: '',
     extraRpcs: [],
+    solProgramId: '',
+    extraSolRpcs: [],
     relayerUrls: [sameOrigin],
     marketUrls: [sameOrigin],
   };
@@ -93,6 +211,33 @@ export function loadSettings(): Settings {
 
 export function saveSettings(s: Settings): void {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+
+/** A Solana network config with user overrides applied. */
+export function activeSolNetwork(network: string, s: Settings = loadSettings()): SolNetworkConfig {
+  const base = SOL_NETWORKS[network] ?? SOL_NETWORKS['solana']!;
+  // RPC ORDER MATTERS. reads (viaRpc) use the first that answers; getLock hits
+  // ALL of them for its cross-check. So:
+  //   1. base.rpcs (publicnode) FIRST — a direct, CORS-clean public RPC. Every
+  //      user's browser hits it from THEIR OWN IP, so the high-volume balance
+  //      polling is rate-limited per-user and scales with the userbase.
+  //   2. user-supplied RPCs next (Settings) — best per-user option at scale.
+  //   3. the same-origin `/sol-rpc` passthrough LAST — a fallback for reads, and
+  //      the independent SECOND source the getLock cross-check needs (it fronts
+  //      a DIFFERENT upstream than publicnode). It funnels through the server's
+  //      one IP, so it deliberately carries only the low-volume verification
+  //      reads, never the continuous balance polling. Mainnet only — devnet has
+  //      no server-side upstream.
+  const sameOrigin =
+    typeof location !== 'undefined' && location.protocol.startsWith('http')
+      ? location.origin
+      : 'http://localhost:9250';
+  const proxyRpc = network === 'solana' ? [`${sameOrigin}/sol-rpc`] : [];
+  return {
+    ...base,
+    htlcProgram: s.solProgramId || base.htlcProgram,
+    rpcs: [...base.rpcs, ...(s.extraSolRpcs ?? []), ...proxyRpc],
+  };
 }
 
 /** Active network config with user overrides applied. */
@@ -123,6 +268,10 @@ export const SWAP_TIMING = {
   minTimelockGapSecs: 8 * 3600,
   /** Buyer refuses to reveal the secret with less than this left before T_brc. */
   buyerClaimSafetySecs: 2 * 3600,
+  /** A maker-buyer waits this long for the taker's `confirm` before cancelling
+   * the swap. Nothing is locked in this window, so cancelling is free and safe.
+   * Longer than the taker's 30 s give-up so a slow-but-alive taker still lands. */
+  confirmTimeoutSecs: 120,
   /** BRC confirmations required on the seller's lock before the buyer claims. */
   brcConfirmations: 3,
   /** Above this many token units (USDT has 6 decimals => 100 USDT), the buyer's
@@ -161,10 +310,12 @@ export const CLAIM_FEE_BPS = RELAY.feeBps / 2n; // 0.2%
 /** Gasless withdrawals only cover gas: 0 bps -> flat `feeMinUnits` fee. */
 export const WITHDRAW_FEE_BPS = 0n;
 
-/** Fee for one relayed op: `bps` of `amount`, floored to cover gas. */
-export function relayerFee(amount: bigint, bps: bigint): bigint {
+/** Fee for one relayed op: `bps` of `amount`, floored to cover gas. The
+ * floor is decimal-sensitive — pair-aware callers pass their pair's
+ * `feeMinUnits`; the default is the 6-decimal stablecoin floor. */
+export function relayerFee(amount: bigint, bps: bigint, floor: bigint = RELAY.feeMinUnits): bigint {
   const pct = (amount * bps) / 10_000n;
-  return pct > RELAY.feeMinUnits ? pct : RELAY.feeMinUnits;
+  return pct > floor ? pct : floor;
 }
 
 /**
@@ -172,18 +323,19 @@ export function relayerFee(amount: bigint, bps: bigint): bigint {
  * `balance` — i.e. the biggest `amt` with `amt + relayerFee(amt, bps) <=
  * balance`. Used by "Max"/"Sell all" so the total never exceeds the balance.
  */
-export function maxSendable(balance: bigint, bps: bigint): bigint {
-  if (balance <= RELAY.feeMinUnits) return 0n;
+export function maxSendable(balance: bigint, bps: bigint, floor: bigint = RELAY.feeMinUnits): bigint {
+  if (balance <= floor) return 0n;
   const amtPct = (balance * 10_000n) / (10_000n + bps); // percentage regime
-  if ((amtPct * bps) / 10_000n >= RELAY.feeMinUnits) return amtPct;
-  return balance - RELAY.feeMinUnits; // floor regime
+  if ((amtPct * bps) / 10_000n >= floor) return amtPct;
+  return balance - floor; // floor regime
 }
 
 /**
- * Minimum trade size (token units). Must comfortably exceed the seller's
- * floored relayFee (else the HTLC contract rejects the lock, "relayFee >=
- * amount"). At 0.30 USDT the fee is a steep ~20% (fine for testing / dust) and
- * dilutes toward the 0.4% headline as trades grow.
+ * Minimum trade size for the DEFAULT pair (token units) — legacy constant;
+ * pair-aware code reads `pairConfig(pair).minTradeUnits` instead. Must
+ * comfortably exceed the seller's floored relayFee (else the HTLC contract
+ * rejects the lock, "relayFee >= amount"). At 0.30 USDT the fee is a steep
+ * ~20% (fine for testing / dust) and dilutes toward the 0.4% headline.
  */
 export const MIN_TRADE_TOKEN = 300_000n; // 0.30 USDT
 

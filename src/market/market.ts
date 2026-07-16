@@ -19,12 +19,14 @@
  */
 import { sha256 } from '@bc/crypto/hash.js';
 import type { Node } from '@bc/node.js';
-import { MARKET, SWAP_TIMING, BRC_LOCK_FEE_DEFAULT, MIN_TRADE_TOKEN, loadSettings } from '../config.js';
+import { MARKET, SWAP_TIMING, BRC_LOCK_FEE_DEFAULT, LOCK_FEE_BPS, relayerFee, loadSettings, PAIRS, DEFAULT_PAIR, pairConfig } from '../config.js';
 import type { SwapEngine, OutboundHint } from '../swap/engine.js';
 import type { SwapStore } from '../swap/store.js';
 import type { SwapRecord } from '../swap/types.js';
+import { TERMINAL_STATES } from '../swap/types.js';
 import { bytesToHex, hexToBytes, randomBytes32 } from '../util/hex.js';
-import type { AcceptMsg, MarketMsg, Offer, OfferParty, TakeMsg } from './protocol.js';
+import { makerMinBrcOf, minFillBrcOf, pairOf, remainingBrcOf, tokenForBrc } from './protocol.js';
+import type { AcceptMsg, ConfirmMsg, MarketMsg, Offer, OfferParty, TakeMsg } from './protocol.js';
 
 const OWN_OFFERS_KEY = 'bswap.offers.v1';
 const MAILBOX_KEY = 'bswap.market.key.v1';
@@ -34,6 +36,8 @@ export interface HistoryTrade {
   amountBrc: string;   // smallest units
   amountToken: string; // token units
   price: number;       // token per 1 BRC
+  /** Trading pair; absent on trades recorded before pairs existed (arb:usdt). */
+  pair?: string;
 }
 
 export class MarketNetwork {
@@ -44,7 +48,7 @@ export class MarketNetwork {
   private consumedOffers = new Set<string>();
   private timers: ReturnType<typeof setInterval>[] = [];
   private listeners = new Set<() => void>();
-  private pendingTakes = new Map<string, { resolve: (swapId: string) => void; reject: (e: Error) => void }>();
+  private pendingTakes = new Map<string, { resolve: (accept: AcceptMsg) => void; reject: (e: Error) => void }>();
   private lastOkAt = 0;
   private lastError = 'not started yet';
   private lastBootId = '';
@@ -53,7 +57,10 @@ export class MarketNetwork {
     private readonly node: Node,
     private readonly store: SwapStore,
     private readonly engine: SwapEngine,
-    private readonly evmAddress: () => string,
+    /** Own addresses per foreign chain ('' = that chain not set up). */
+    private readonly addresses: { evm: () => string; sol: () => string },
+    /** Own token balance on a pair, for auto-filling buy-brc offers (null = unknown). */
+    private readonly tokenBalance: (pair: string) => Promise<bigint | null> = async () => null,
   ) {
     // Stable mailbox identity across reloads (a mid-swap reload must keep
     // receiving handshake messages at the same address).
@@ -119,6 +126,20 @@ export class MarketNetwork {
   stop(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+  }
+
+  /**
+   * Drive one round of market upkeep from an EXTERNAL clock. Browsers
+   * throttle a background tab's own timers to ~1/min, which is fatal for the
+   * maker role: takes give up after 30 s, so a minimized tab misses sales.
+   * The PiP keep-alive window schedules these on its own (never-throttled)
+   * clock instead. All three are idempotent and safe to overlap with the
+   * regular timers.
+   */
+  poke(kind: 'heartbeat' | 'offers' | 'mailbox'): void {
+    if (kind === 'heartbeat') void this.postOwnOffers();
+    else if (kind === 'offers') void this.pollOffers();
+    else void this.pollMailbox();
   }
 
   // ----------------------------------------------------------------- HTTP
@@ -198,8 +219,11 @@ export class MarketNetwork {
     const mineIds = new Set(this.ownOffers.map((o) => o.id));
     const rejected: string[] = [];
     const fresh = raw.filter((o) => {
-      if (o?.v !== 1) { rejected.push(`${o?.id ?? '?'}:badversion`); return false; }
-      if (o.side !== 'sell-brc') { rejected.push(`${o.id}:side`); return false; }
+      // v1 = implicit arb:usdt; v2 adds `pair` (must be one we know). Old
+      // clients drop v2 offers the same way, so sol pairs never leak to them.
+      if (o?.v !== 1 && o?.v !== 2) { rejected.push(`${o?.id ?? '?'}:badversion`); return false; }
+      if (!PAIRS[pairOf(o)]) { rejected.push(`${o.id}:pair`); return false; }
+      if (o.side !== 'sell-brc' && o.side !== 'buy-brc') { rejected.push(`${o.id}:side`); return false; }
       if (!o.maker?.peerId) { rejected.push(`${o.id}:nomaker`); return false; }
       if (mineIds.has(o.id)) { rejected.push(`${o.id}:mine-byid`); return false; }
       if (o.maker.peerId === this.myBoxId) { rejected.push(`${o.id}:mine-bybox`); return false; }
@@ -233,14 +257,23 @@ export class MarketNetwork {
     return this.ownOffers;
   }
 
-  postOffer(amountBrc: bigint, amountToken: bigint, feeWei: bigint = BRC_LOCK_FEE_DEFAULT): Offer {
+  postOffer(side: Offer['side'], amountBrc: bigint, amountToken: bigint, opts: { feeWei?: bigint; minBrc?: bigint; pair?: string } = {}): Offer {
+    const pair = opts.pair ?? DEFAULT_PAIR;
+    if (!PAIRS[pair]) throw new Error(`unknown pair: ${pair}`);
+    if (pairConfig(pair).chain === 'sol' && !this.addresses.sol()) {
+      throw new Error('Solana wallet not set up');
+    }
     const offer: Offer = {
-      v: 1,
+      // arb:usdt keeps v:1 so pre-pair clients still see those offers; any
+      // other pair MUST go out as v:2 (old clients drop unknown versions).
+      ...(pair === DEFAULT_PAIR ? { v: 1 as const } : { v: 2 as const, pair }),
       id: bytesToHex(randomBytes32()).slice(0, 16),
-      side: 'sell-brc',
+      side,
       amountBrc: amountBrc.toString(),
       amountToken: amountToken.toString(),
-      makerFeeWei: feeWei.toString(),
+      // the BRC lock fee is the seller's cost; on buy-brc the TAKER sells
+      ...(side === 'sell-brc' ? { makerFeeWei: (opts.feeWei ?? BRC_LOCK_FEE_DEFAULT).toString() } : {}),
+      ...(opts.minBrc && opts.minBrc > 0n ? { minBrc: opts.minBrc.toString() } : {}),
       maker: this.selfParty(),
       ts: Math.floor(Date.now() / 1000),
     };
@@ -263,11 +296,45 @@ export class MarketNetwork {
     return () => this.listeners.delete(fn);
   }
 
+  // A fill is accepted minutes before its lock lands on-chain, so the wallet
+  // balance alone can't tell how much is still spendable — rapid partial
+  // fills would each pass against the same untouched balance and over-commit.
+  // Reserve the full amount of every swap that isn't finished yet: this
+  // over-reserves a little after a lock confirms (balance already reduced),
+  // which at worst rejects a take the maker could technically afford — far
+  // better than accepting one it can't fund and stranding the counterparty
+  // behind a timelock refund.
+
+  /** BRC promised to unfinished swaps where we are the seller. */
+  private reservedBrc(): bigint {
+    let sum = 0n;
+    for (const s of this.store.all()) {
+      if (s.role !== 'seller' || TERMINAL_STATES.has(s.state)) continue;
+      sum += BigInt(s.amountBrc) + BigInt(s.brcFeeWei ?? BRC_LOCK_FEE_DEFAULT.toString());
+    }
+    return sum;
+  }
+
+  /** Token units promised to unfinished swaps (on `pair`) where we buy. */
+  private reservedToken(pair: string): bigint {
+    const floor = pairConfig(pair).feeMinUnits;
+    let sum = 0n;
+    for (const s of this.store.all()) {
+      if (s.role !== 'buyer' || TERMINAL_STATES.has(s.state)) continue;
+      if ((s.pair ?? DEFAULT_PAIR) !== pair) continue;
+      const amount = BigInt(s.amountToken);
+      sum += amount + relayerFee(amount, LOCK_FEE_BPS, floor);
+    }
+    return sum;
+  }
+
   private selfParty(): OfferParty {
+    const sol = this.addresses.sol();
     return {
       peerId: this.myBoxId,
       brcPubkey: bytesToHex(this.node.wallet.publicKey),
-      evmAddress: this.evmAddress(),
+      evmAddress: this.addresses.evm(),
+      ...(sol ? { solAddress: sol } : {}),
     };
   }
 
@@ -308,21 +375,28 @@ export class MarketNetwork {
         void this.onTake(msg);
         return;
       case 'accept': {
-        const pending = this.pendingTakes.get(msg.offerId);
+        // takeId pairs the response with ITS take (several takes of one offer
+        // can be in flight); offerId fallback covers legacy makers/bots.
+        const key = msg.takeId ?? msg.offerId;
+        const pending = this.pendingTakes.get(key);
         if (pending) {
-          this.pendingTakes.delete(msg.offerId);
-          pending.resolve(msg.swapId);
+          this.pendingTakes.delete(key);
+          pending.resolve(msg);
         }
         return;
       }
       case 'reject': {
-        const pending = this.pendingTakes.get(msg.offerId);
+        const key = msg.takeId ?? msg.offerId;
+        const pending = this.pendingTakes.get(key);
         if (pending) {
-          this.pendingTakes.delete(msg.offerId);
+          this.pendingTakes.delete(key);
           pending.reject(new Error(msg.reason));
         }
         return;
       }
+      case 'confirm':
+        this.onConfirm(msg);
+        return;
       case 'hint':
         // Route to the engine; it verifies everything on-chain itself.
         void this.engine.onHint(msg.swapId, msg.hint);
@@ -335,45 +409,84 @@ export class MarketNetwork {
   // ---------------------------------------------------------------- taking
 
   /**
-   * Take a remote offer: generate the secret (we become the BUYER and only
-   * ever reveal it by redeeming BRC on our own validated chain), propose
-   * timelocks, and wait for the maker's accept.
+   * Take a remote offer, fully or partially (`brcPart` defaults to everything
+   * left). On a sell-brc offer we become the BUYER: generate the secret (only
+   * ever revealed by redeeming BRC on our own validated chain) and send its
+   * hashlock. On a buy-brc offer we become the SELLER: the maker is the buyer
+   * and returns the hashlock it generated in the accept. Either way we
+   * propose the timelocks and wait for the maker's accept.
    */
-  takeOffer(offerId: string): Promise<string> {
+  takeOffer(offerId: string, brcPart?: bigint): Promise<string> {
     const offer = this.remoteOffers.find((o) => o.id === offerId);
     if (!offer) return Promise.reject(new Error('offer no longer available'));
+    const pair = pairOf(offer);
+    const minTrade = pairConfig(pair).minTradeUnits;
+    const remaining = remainingBrcOf(offer);
+    const takeBrc = brcPart ?? remaining;
+    if (takeBrc <= 0n) return Promise.reject(new Error('amount must be positive'));
+    if (takeBrc > remaining) return Promise.reject(new Error('amount exceeds what is left of this offer'));
+    const takeToken = tokenForBrc(offer, takeBrc);
+    if (takeToken < minTrade) return Promise.reject(new Error('fill below the minimum trade size'));
+    if (takeBrc < minFillBrcOf(offer, minTrade)) return Promise.reject(new Error('below this offer’s minimum fill'));
 
-    const secret = randomBytes32();
-    const hashlock = bytesToHex(sha256(secret));
+    if (pairConfig(pair).chain === 'sol' && !this.addresses.sol()) {
+      return Promise.reject(new Error('Solana wallet not set up'));
+    }
+    const weBuy = offer.side === 'sell-brc';
+    if (!weBuy) {
+      // We become the SELLER: the maker locks USDT the moment it accepts, so
+      // an underfunded take would strand THEIR money behind the timelock.
+      // Count BRC already promised to unfinished swaps, not just the balance.
+      const need = this.reservedBrc() + takeBrc + BRC_LOCK_FEE_DEFAULT;
+      if (this.node.myBalance() < need) {
+        return Promise.reject(new Error('not enough BRC for this fill (amount + lock fee, on top of swaps already running)'));
+      }
+    }
+    const secret = weBuy ? randomBytes32() : null;
+    const hashlock = secret ? bytesToHex(sha256(secret)) : undefined;
+    const takeId = bytesToHex(randomBytes32()).slice(0, 16);
     const now = Math.floor(Date.now() / 1000);
     const take: TakeMsg = {
       t: 'take',
       offerId: offer.id,
+      ...(offer.pair ? { pair } : {}),
+      takeId,
       taker: this.selfParty(),
-      hashlock,
+      amountBrc: takeBrc.toString(),
+      amountToken: takeToken.toString(),
+      ...(hashlock ? { hashlock } : {}),
       evmTimelock: now + SWAP_TIMING.evmTimelockSecs,
       brcLocktime: now + SWAP_TIMING.brcLocktimeSecs,
     };
 
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pendingTakes.delete(offer.id);
+        this.pendingTakes.delete(takeId);
         reject(new Error('maker did not respond (their tab may have just closed)'));
       }, 30_000);
-      this.pendingTakes.set(offer.id, {
-        resolve: (swapId) => {
+      this.pendingTakes.set(takeId, {
+        resolve: (accept) => {
           clearTimeout(timer);
-          // Persist the buyer-side swap BEFORE anything moves on any chain.
+          // Selling into a buy-brc offer: the hashlock comes from the maker.
+          const agreedHashlock = hashlock ?? accept.hashlock ?? '';
+          if (!/^[0-9a-f]{64}$/.test(agreedHashlock)) {
+            reject(new Error('maker sent no valid hashlock'));
+            return;
+          }
+          // Persist our side of the swap BEFORE anything moves on any chain.
           const swap: SwapRecord = {
-            id: swapId,
-            role: 'buyer',
+            id: typeof accept.swapId === 'string' && accept.swapId ? accept.swapId : agreedHashlock,
+            pair,
+            role: weBuy ? 'buyer' : 'seller',
+            origin: 'taker',
             offerId: offer.id,
             createdAt: now,
             updatedAt: now,
-            amountBrc: offer.amountBrc,
-            amountToken: offer.amountToken,
-            hashlock,
-            secret: bytesToHex(secret),
+            amountBrc: takeBrc.toString(),
+            amountToken: takeToken.toString(),
+            ...(weBuy ? {} : { brcFeeWei: BRC_LOCK_FEE_DEFAULT.toString() }),
+            hashlock: agreedHashlock,
+            ...(secret ? { secret: bytesToHex(secret) } : {}),
             self: this.selfParty(),
             counterparty: offer.maker,
             evmTimelock: take.evmTimelock,
@@ -382,16 +495,21 @@ export class MarketNetwork {
             state: 'init',
           };
           this.store.put(swap);
-          void this.engine.tick(swapId);
-          resolve(swapId);
+          // Tell the maker we're engaged so a maker-buyer can safely lock its
+          // token; a maker-seller ignores it and waits for our on-chain lock.
+          void this.send(offer.maker.peerId, {
+            t: 'confirm', offerId: offer.id, takeId, swapId: swap.id,
+          });
+          void this.engine.tick(swap.id);
+          resolve(swap.id);
         },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
       void this.send(offer.maker.peerId, take).then((delivered) => {
         if (!delivered) {
-          const pending = this.pendingTakes.get(offer.id);
+          const pending = this.pendingTakes.get(takeId);
           if (pending) {
-            this.pendingTakes.delete(offer.id);
+            this.pendingTakes.delete(takeId);
             pending.reject(new Error('no market server reachable'));
           }
         }
@@ -399,17 +517,33 @@ export class MarketNetwork {
     });
   }
 
-  /** Maker side: auto-accept the first valid take on a live offer. */
+  /** Maker side: auto-accept a valid (possibly partial) take on a live offer. */
   private async onTake(take: TakeMsg): Promise<void> {
     const offer = this.ownOffers.find((o) => o.id === take.offerId);
     const rejectWith = (reason: string): Promise<boolean> =>
-      this.send(take.taker.peerId, { t: 'reject', offerId: take.offerId, reason });
+      this.send(take.taker.peerId, { t: 'reject', offerId: take.offerId, takeId: take.takeId, reason });
     if (!offer) { void rejectWith('offer no longer available'); return; }
-    if (!/^[0-9a-f]{64}$/.test(take.hashlock)) { void rejectWith('bad hashlock'); return; }
+    const pair = pairOf(offer);
+    const chain = pairConfig(pair).chain;
+    const minTrade = pairConfig(pair).minTradeUnits;
     if (!/^[0-9a-f]{64}$/.test(take.taker.brcPubkey)) { void rejectWith('bad BRC pubkey'); return; }
-    if (!/^0x[0-9a-fA-F]{40}$/.test(take.taker.evmAddress)) { void rejectWith('bad EVM address'); return; }
+    // The taker needs a valid address on THIS pair's foreign chain.
+    if (chain === 'evm' && !/^0x[0-9a-fA-F]{40}$/.test(take.taker.evmAddress)) { void rejectWith('bad EVM address'); return; }
+    if (chain === 'sol' && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(take.taker.solAddress ?? '')) { void rejectWith('bad Solana address'); return; }
     if (!/^[0-9a-f]{20}$/.test(take.taker.peerId)) { void rejectWith('bad mailbox id'); return; }
-    if (BigInt(offer.amountToken) < MIN_TRADE_TOKEN) { void rejectWith('trade below minimum size'); return; }
+
+    // Fill amounts: any part of what's left, at EXACTLY the offer's price
+    // (tokenForBrc is the canonical rounding both sides compute).
+    let takeBrc = 0n;
+    let takeToken = 0n;
+    try {
+      takeBrc = BigInt(take.amountBrc ?? '');
+      takeToken = BigInt(take.amountToken ?? '');
+    } catch { void rejectWith('bad fill amounts'); return; }
+    if (takeBrc <= 0n || takeBrc > remainingBrcOf(offer)) { void rejectWith('amount exceeds the offer'); return; }
+    if (takeToken !== tokenForBrc(offer, takeBrc)) { void rejectWith('fill price mismatch'); return; }
+    if (takeToken < minTrade) { void rejectWith('trade below minimum size'); return; }
+    if (takeBrc < minFillBrcOf(offer, minTrade)) { void rejectWith('fill below the offer minimum'); return; }
 
     // Timelock policy: reject anything that squeezes our claim window.
     const now = Math.floor(Date.now() / 1000);
@@ -420,41 +554,101 @@ export class MarketNetwork {
     if (brcWindow < 10 * 3600 || brcWindow > 14 * 3600) { void rejectWith('bad BRC locktime'); return; }
     if (gap < SWAP_TIMING.minTimelockGapSecs) { void rejectWith('timelock gap too small'); return; }
 
-    // Enough BRC to actually lock (amount + the lock fee we committed to)?
+    const weSell = offer.side === 'sell-brc';
     const lockFee = BigInt(offer.makerFeeWei ?? BRC_LOCK_FEE_DEFAULT.toString());
-    if (this.node.myBalance() < BigInt(offer.amountBrc) + lockFee) {
-      void rejectWith('maker balance too low');
-      return;
+    let hashlock: string;
+    let secret: Uint8Array | null = null;
+    if (weSell) {
+      // The taker is the buyer and must have committed to a secret.
+      if (!/^[0-9a-f]{64}$/.test(take.hashlock ?? '')) { void rejectWith('bad hashlock'); return; }
+      hashlock = take.hashlock!;
+      // Enough BRC to actually lock this fill — counting what earlier fills
+      // have already promised but not yet locked on-chain?
+      if (this.node.myBalance() < this.reservedBrc() + takeBrc + lockFee) { void rejectWith('maker balance too low'); return; }
+    } else {
+      // Buy offer: WE are the buyer, so we generate and hold the secret.
+      // Need enough of the pair's token for this fill plus the relayer's
+      // lock fee, on top of what unfinished swaps have already committed.
+      let balance: bigint | null = null;
+      try { balance = await this.tokenBalance(pair); } catch { balance = null; }
+      if (balance === null) { void rejectWith('maker cannot verify its balance'); return; }
+      if (balance < this.reservedToken(pair) + takeToken + relayerFee(takeToken, LOCK_FEE_BPS, pairConfig(pair).feeMinUnits)) { void rejectWith('maker balance too low'); return; }
+      // The balance check awaited — another take may have raced us. Re-check.
+      if (!this.ownOffers.includes(offer) || takeBrc > remainingBrcOf(offer)) {
+        void rejectWith('offer no longer available');
+        return;
+      }
+      secret = randomBytes32();
+      hashlock = bytesToHex(sha256(secret));
     }
+    if (this.store.get(hashlock)) { void rejectWith('duplicate take'); return; }
 
-    // Consume the offer so it can't be double-taken, then start the swap.
-    this.ownOffers = this.ownOffers.filter((o) => o.id !== offer.id);
-    this.consumedOffers.add(offer.id);
+    // Consume the fill: shrink the offer, delist it entirely once what's left
+    // is gone or too small to ever be taken — by the platform floor OR by the
+    // maker's own minimum fill (Binance-P2P-style: ads close below their min).
+    const newRemaining = remainingBrcOf(offer) - takeBrc;
+    if (newRemaining <= 0n || tokenForBrc(offer, newRemaining) < minTrade || newRemaining < makerMinBrcOf(offer)) {
+      this.ownOffers = this.ownOffers.filter((o) => o.id !== offer.id);
+      this.consumedOffers.add(offer.id);
+      void this.postAll('/offers/delete', { offerId: offer.id, key: this.readKey });
+    } else {
+      offer.remainingBrc = newRemaining.toString();
+      offer.ts = now;
+      void this.postAll('/offers', { offer, key: this.readKey });
+    }
     this.persistOwn();
-    void this.postAll('/offers/delete', { offerId: offer.id, key: this.readKey });
     this.emit();
 
-    const swapId = take.hashlock; // unique per swap: fresh secret => fresh hash
+    const swapId = hashlock; // unique per swap: fresh secret => fresh hash
     const swap: SwapRecord = {
       id: swapId,
-      role: 'seller',
+      pair,
+      role: weSell ? 'seller' : 'buyer',
+      origin: 'maker',
       offerId: offer.id,
       createdAt: now,
       updatedAt: now,
-      amountBrc: offer.amountBrc,
-      amountToken: offer.amountToken,
-      brcFeeWei: lockFee.toString(),
-      hashlock: take.hashlock,
+      amountBrc: takeBrc.toString(),
+      amountToken: takeToken.toString(),
+      ...(weSell ? { brcFeeWei: lockFee.toString() } : {}),
+      hashlock,
+      ...(secret ? { secret: bytesToHex(secret) } : {}),
       self: this.selfParty(),
       counterparty: take.taker,
       evmTimelock: take.evmTimelock,
       brcLocktime: take.brcLocktime,
       evm: {}, brc: {},
-      state: 'init',
+      // A maker-seller waits for the taker's on-chain lock before it commits, so
+      // it can start immediately. A maker-BUYER locks its token first, so it
+      // holds until the taker confirms — otherwise a take from a taker whose 30 s
+      // window already lapsed would strand the maker's funds behind the timelock.
+      state: weSell ? 'init' : 'awaiting-confirm',
     };
     this.store.put(swap);
-    const accept: AcceptMsg = { t: 'accept', offerId: offer.id, swapId };
+    const accept: AcceptMsg = {
+      t: 'accept',
+      offerId: offer.id,
+      ...(offer.pair ? { pair } : {}),
+      takeId: take.takeId,
+      swapId,
+      // buy-brc: hand the taker (seller) the hashlock we generated; amounts
+      // let market servers pair this fill with the on-chain claim (history).
+      ...(weSell ? {} : { hashlock }),
+      amountBrc: swap.amountBrc,
+      amountToken: swap.amountToken,
+    };
     await this.send(take.taker.peerId, accept);
     void this.engine.tick(swapId);
+  }
+
+  /** A maker-buyer that locks its token first stays in 'awaiting-confirm' until
+   * this arrives — proof the taker got our accept and is proceeding — so its
+   * funds are never stranded against a taker whose 30 s window already lapsed. */
+  private onConfirm(msg: ConfirmMsg): void {
+    const swap = this.store.get(msg.swapId);
+    if (swap && swap.state === 'awaiting-confirm') {
+      this.store.put({ ...swap, state: 'init', updatedAt: Math.floor(Date.now() / 1000) });
+      void this.engine.tick(swap.id);
+    }
   }
 }

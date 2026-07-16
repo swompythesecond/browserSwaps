@@ -22,9 +22,14 @@ secret, and claims the USDT (via the relayer, so the bot needs no ETH).
 | Var | Meaning | Default |
 |---|---|---|
 | `BRC_PRIVATE_KEY` | 64-hex BRC key holding the BRC you're selling | **required** |
-| `EVM_ADDRESS` | Arbitrum address where you receive USDT | **required** |
+| `PAIR` | market to sell into: `arb:usdt`, `sol:usdc`, `sol:usdt` | `arb:usdt` |
+| `EVM_ADDRESS` | Arbitrum address where you receive USDT | **required** on `arb:usdt` |
+| `SOL_ADDRESS` | Solana address where you receive USDC/USDT | **required** on `sol:*` |
+| `SOL_HTLC_PROGRAM` | bswap-htlc program id (base58) | **required** on `sol:*` |
+| `SOL_RPC` | Solana RPC | mainnet-beta public RPC |
+| `SOL_MINT` | SPL mint override | derived from `PAIR` |
 | `AMOUNT_BRC` | BRC to sell, in 1e-8 units | `10000000000` (100 BRC) |
-| `AMOUNT_TOKEN` | USDT price, in 1e-6 units | `1000000` (1 USDT) |
+| `AMOUNT_TOKEN` | token price, in 1e-6 units | `1000000` (1 USDT) |
 | `MARKET_URL` | market server | `http://localhost:9250` |
 | `RELAYER_URL` | relayer (gas station) | `http://localhost:9250` |
 | `BRC_API_URL` | a BrowserCoin API helper | `https://api1.browsercoin.org` |

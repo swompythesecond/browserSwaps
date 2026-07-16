@@ -130,7 +130,7 @@ describe('SwapEngine', () => {
     store = new SwapStore();
     hints = [];
     now = T0 + 60;
-    engine = new SwapEngine(evm, brc, store, (_p, h) => hints.push(h), () => now);
+    engine = new SwapEngine(() => evm, brc, store, (_p, h) => hints.push(h), () => now);
   });
 
   it('buyer happy path: lock USDT -> see BRC lock -> claim, revealing the secret', async () => {
@@ -175,6 +175,21 @@ describe('SwapEngine', () => {
     await engine.tick(HASH);
     expect(store.get(HASH)!.state).toBe('refunded');
     expect(evm.refundCalls).toBe(1);
+  });
+
+  it('maker-buyer in awaiting-confirm locks NOTHING until the taker confirms', async () => {
+    store.put({ ...baseSwap('buyer'), state: 'awaiting-confirm' });
+    await engine.tick(HASH);
+    expect(store.get(HASH)!.state).toBe('awaiting-confirm'); // still holding
+    expect(evm.lockCalls).toBe(0);                            // no funds committed
+  });
+
+  it('maker-buyer cancels safely (no funds locked) when the confirm never arrives', async () => {
+    store.put({ ...baseSwap('buyer'), state: 'awaiting-confirm' });
+    now = T0 + SWAP_TIMING.confirmTimeoutSecs + 1; // past the confirm deadline
+    await engine.tick(HASH);
+    expect(store.get(HASH)!.state).toBe('failed');
+    expect(evm.lockCalls).toBe(0); // nothing was ever locked -> nothing stranded
   });
 
   it('seller happy path: verify USDT lock -> lock BRC -> learn secret -> claim USDT', async () => {

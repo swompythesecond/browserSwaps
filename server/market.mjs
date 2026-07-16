@@ -168,9 +168,19 @@ export function createMarket(history = null) {
       console.log(new Date().toISOString(), `msg '${payload?.t ?? '?'}' -> ${to}`);
       // A take against a live offer becomes a PENDING history entry; it only
       // ever becomes a published trade once the claim is proven on-chain.
+      // Fill amounts ride in the take itself (partial fills); older clients
+      // fall back to the whole offer. buy-brc takes carry no hashlock — the
+      // maker generates it there — so those pend on the accept instead.
       if (history && payload?.t === 'take' && typeof payload.offerId === 'string') {
         const taken = offers.get(payload.offerId);
-        if (taken) history.notePending(payload.hashlock, taken.offer.amountBrc, taken.offer.amountToken);
+        const amountBrc = payload.amountBrc ?? taken?.offer.amountBrc;
+        const amountToken = payload.amountToken ?? taken?.offer.amountToken;
+        const pair = payload.pair ?? taken?.offer.pair ?? 'arb:usdt';
+        if (payload.hashlock && amountBrc && amountToken) history.notePending(payload.hashlock, amountBrc, amountToken, pair);
+      }
+      if (history && payload?.t === 'accept' && payload.hashlock && payload.amountBrc && payload.amountToken) {
+        const pair = payload.pair ?? offers.get(payload.offerId)?.offer.pair ?? 'arb:usdt';
+        history.notePending(payload.hashlock, payload.amountBrc, payload.amountToken, pair);
       }
       return json(res, 200, { ok: true }, cors);
     }
