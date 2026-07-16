@@ -443,6 +443,7 @@ export class HtlcSolAdapter implements EvmAdapter {
       amount: v.amount,
       hashlock: v.hashlock,
       timelock: v.timelock,
+      relayFee: v.relayFee,
       claimed: status === 1,
       refunded: status === 2,
       safe,

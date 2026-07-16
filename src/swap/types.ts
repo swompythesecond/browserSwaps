@@ -115,6 +115,7 @@ export interface EvmLockView {
   amount: bigint;
   hashlock: string;          // hex, no 0x
   timelock: number;          // unix seconds
+  relayFee: bigint;          // paid to a non-beneficiary claim/refund submitter, out of `amount`
   claimed: boolean;
   refunded: boolean;
   /** Strong-finality flag: EVM = visible at the `safe` (L1-posted) block tag,

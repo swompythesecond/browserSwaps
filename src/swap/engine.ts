@@ -284,7 +284,18 @@ export class SwapEngine {
           return;
         }
         // The lock id commits to token/amount/recipient/hashlock/timelock, so
-        // existence == parameter correctness. Remaining checks are policy:
+        // existence == parameter correctness for THOSE. relayFee is NOT in the
+        // id and NOT bound by it — a buyer can set it to amount-1, and since a
+        // non-beneficiary claim (the relayer, or the buyer front-running us with
+        // the secret they already know) pays relayFee to the submitter out of
+        // `amount`, an unchecked fee drains our proceeds to dust. Reject any fee
+        // above the standard claim fee before we lock anything.
+        const maxRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(swap.pair).feeMinUnits);
+        if (view.relayFee > maxRelayFee) {
+          this.fail(swap, 'USDT lock relayFee too high');
+          return;
+        }
+        // Remaining checks are policy:
         if (view.timelock - now < SWAP_TIMING.minEvmWindowSecs) {
           this.fail(swap, 'USDT lock window too short');
           return;

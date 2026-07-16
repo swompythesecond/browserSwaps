@@ -33,7 +33,7 @@ class MockEvm implements EvmAdapter {
     this.lockView = {
       token: '0xT', sender: '0xSELF', recipient: '0xCP', amount: 5_000_000n,
       hashlock: HASH, timelock: T0 + SWAP_TIMING.evmTimelockSecs,
-      claimed: false, refunded: false, safe: true, ageSecs: 120,
+      relayFee: 0n, claimed: false, refunded: false, safe: true, ageSecs: 120,
     };
     return { lockId: '0xlockid', txHash: '0xtx1' };
   }
@@ -221,6 +221,17 @@ describe('SwapEngine', () => {
     evm.lockView = { ...evm.lockView, safe: true };
     await engine.tick(HASH);
     expect(store.get(HASH)!.state).toBe('brc-locked');
+  });
+
+  it('seller rejects a USDT lock whose relayFee would drain the payout', async () => {
+    store.put(baseSwap('seller'));
+    await evm.lock();
+    // relayFee is not committed by the lock id; a buyer sets it near `amount`
+    // so a non-beneficiary claim skims almost everything from our proceeds.
+    evm.lockView = { ...evm.lockView!, relayFee: evm.lockView!.amount - 1n };
+    await engine.tick(HASH);
+    expect(store.get(HASH)!.state).toBe('failed');
+    expect(brc.lock).toBeNull(); // we must NOT have locked BRC
   });
 
   it('seller refunds BRC at locktime, but a last-second reveal flips to claiming USDT', async () => {

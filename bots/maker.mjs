@@ -36,7 +36,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 // tsx, which resolves the .ts sources), so price rounding and the trade
 // minimum can never drift out of sync with real takers.
 import { tokenForBrc as canonicalTokenForBrc, minBrcForFill } from '../src/market/protocol.js';
-import { PAIRS } from '../src/config.js';
+import { PAIRS, pairConfig, relayerFee, CLAIM_FEE_BPS } from '../src/config.js';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -231,6 +231,7 @@ async function readSolLock(lockStatePda) {
   return {
     amount: dv.getBigUint64(170, true),
     timelock: Number(dv.getBigInt64(210, true)),
+    relayFee: dv.getBigUint64(218, true),
     claimed: status === 1,
     refunded: status === 2,
   };
@@ -257,6 +258,13 @@ async function tickSwap(hashlock) {
       }
       if (!view) { if (now - s.createdAt > 1800) { s.state = 'failed'; console.log('[fail] buyer never locked the tokens'); } return; }
       if (view.claimed || view.refunded) { s.state = 'failed'; return; }
+      // relayFee is NOT part of the lock id, so lock existence does not vouch
+      // for it. A buyer who sets relayFee near `amount` drains our proceeds: a
+      // non-beneficiary claim (relayer, or the buyer front-running with the
+      // secret) pays relayFee to the submitter out of `amount`. Reject anything
+      // above the standard claim fee before we lock BRC.
+      const maxRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(cfg.pair).feeMinUnits);
+      if (view.relayFee > maxRelayFee) { s.state = 'failed'; console.log('[fail] token lock relayFee too high'); return; }
       if (view.timelock - now < 20 * 3600) { s.state = 'failed'; console.log('[fail] token lock window too short'); return; }
       s.lockId = lockId;
       s.state = 'lock-brc';

@@ -413,6 +413,7 @@ export class HtlcEvmAdapter implements EvmAdapter {
       amount: v.row[3],
       hashlock: (v.row[4] as string).replace(/^0x/, ''),
       timelock: Number(v.row[5]),
+      relayFee: v.row[6],
       claimed: v.row[7],
       refunded: v.row[8],
       safe,
