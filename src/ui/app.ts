@@ -32,7 +32,7 @@ import type { SwapStore } from '../swap/store.js';
 import type { SwapRecord, SwapState } from '../swap/types.js';
 import type { HtlcEvmAdapter } from '../evm/htlcAdapter.js';
 import { exportEvmKey } from '../evm/wallet.js';
-import type { HtlcSolAdapter } from '../sol/htlcAdapter.js';
+import { SOL_WITHDRAW_ATA_FEE_UNITS, type HtlcSolAdapter } from '../sol/htlcAdapter.js';
 import { exportSolKey } from '../sol/wallet.js';
 import { el, formatBrc, parseBrc, formatUnits, parseUnits, short, timeAgo } from './format.js';
 import { bytesToHex } from '../util/hex.js';
@@ -1528,11 +1528,32 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     const toIn = el('input', { class: 'input wide', placeholder: `recipient ${chainName} address${onSol ? '' : ' 0x…'}`, 'data-keep': `wd-tok-to-${pair}` }) as HTMLInputElement;
     const amtIn = el('input', { class: 'input', placeholder: `amount ${sym}`, 'data-keep': `wd-tok-amt-${pair}` }) as HTMLInputElement;
     const flatFee = (amt: bigint): bigint => relayerFee(amt, WITHDRAW_FEE_BPS, pc.feeMinUnits);
+    const isSolAddr = (s: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
     const maxBtn = el('button', { class: 'btn ghost', title: 'balance minus the relayer fee' }, 'Max') as HTMLButtonElement;
     maxBtn.onclick = () => {
-      if (balOf(pair).ok) {
-        amtIn.value = formatUnits(maxSendable(balOf(pair).token, WITHDRAW_FEE_BPS, pc.feeMinUnits), dec, dec);
-      }
+      void (async () => {
+        if (!balOf(pair).ok) return;
+        // On Solana the fee depends on the recipient — a wallet that has never
+        // held this token needs its token account created (the relayer fronts
+        // the rent) — so Max can only be exact once the address is filled in.
+        let floor = pc.feeMinUnits;
+        const adapter = ctx.foreign(pair);
+        if (onSol && !isNativeSol && adapter) {
+          const to = toIn.value.trim();
+          if (!isSolAddr(to)) {
+            toast('enter the recipient address first — the fee depends on it');
+            return;
+          }
+          maxBtn.disabled = true;
+          try {
+            floor = await (adapter as HtlcSolAdapter).withdrawFee(to);
+          } catch {
+            floor = SOL_WITHDRAW_ATA_FEE_UNITS; // RPC unreachable: assume the worst-case fee
+          }
+          maxBtn.disabled = false;
+        }
+        amtIn.value = formatUnits(maxSendable(balOf(pair).token, WITHDRAW_FEE_BPS, floor), dec, dec);
+      })();
     };
     const sendBtn = el('button', { class: 'btn primary' }, `Withdraw ${sym}`) as HTMLButtonElement;
     sendBtn.onclick = () => {
@@ -1542,14 +1563,17 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
           if (!adapter) throw new Error(`configure ${pc.label} in Settings first`);
           const to = toIn.value.trim();
           if (!onSol && !/^0x[0-9a-fA-F]{40}$/.test(to)) throw new Error('recipient must be a 0x… Arbitrum address');
-          if (onSol && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(to)) throw new Error('recipient must be a Solana (base58) address');
+          if (onSol && !isSolAddr(to)) throw new Error('recipient must be a Solana (base58) address');
           const amt = parseUnits(amtIn.value, dec);
           if (amt <= 0n) throw new Error('amount must be positive');
           // Solana: creating the recipient's token account costs the relayer
           // real rent, so the flat fee is higher for brand-new recipients.
           const fee = onSol ? await (adapter as HtlcSolAdapter).withdrawFee(to) : flatFee(amt);
           if (balOf(pair).ok && balOf(pair).token < amt + fee) {
-            throw new Error(`not enough ${sym}: withdrawal needs the amount plus a ${formatUnits(fee, dec, disp)} ${sym} network fee`);
+            const why = onSol && fee > pc.feeMinUnits
+              ? ` (higher than usual: this recipient has never held ${sym} on Solana, so the fee also covers creating its token account)`
+              : '';
+            throw new Error(`not enough ${sym}: withdrawal needs the amount plus a ${formatUnits(fee, dec, disp)} ${sym} network fee${why} — use Max to withdraw the most possible`);
           }
           sendBtn.disabled = true;
           toast(`Sending withdrawal (no ${gasCoin} needed — a relayer pays the gas)…`);
