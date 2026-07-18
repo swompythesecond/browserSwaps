@@ -160,6 +160,43 @@ table.book { width: 100%; border-collapse: collapse; font-size: 14px; }
 .mkt-row .mkt-name { font-weight: 600; }
 .mkt-row .price { font-weight: 600; }
 
+/* History pair switcher: jump straight between USDT/USDC/SOL markets */
+.pair-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--border); background: var(--bg); color: var(--muted); padding: 5px 12px; border-radius: 999px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.chip:hover { color: var(--text); border-color: var(--muted); }
+.chip.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 8%, var(--bg)); cursor: default; }
+
+/* ---------- phones: nothing may bleed past the viewport ---------- */
+@media (max-width: 720px) {
+  .app { padding: 0 10px 48px; }
+  .card { padding: 14px 12px; }
+  .topbar { gap: 8px; }
+  /* tab bar scrolls sideways instead of pushing the layout wide */
+  .tabs { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { padding: 6px 10px; font-size: 13px; white-space: nowrap; }
+  .modal { max-height: 85dvh; }
+
+  /* grids scroll inside their card as a last resort instead of overflowing the page */
+  .orderbook, .mkt-table { overflow-x: auto; }
+  .ob-head, .ob-row { grid-template-columns: minmax(72px, 1.1fr) 1fr 1fr 48px; gap: 6px; }
+  .ob-row { padding: 7px 6px; font-size: 12px; }
+  .ob-head { padding: 4px 6px 8px; }
+  .ob-btn { padding: 4px 8px; }
+
+  /* markets overview: keep Market / Last / 24h volume / Your balance,
+   * drop best bid, best ask and offer counts (the open book shows them) */
+  .mkt-head, .mkt-row { grid-template-columns: minmax(86px, 1.3fr) 1fr 1.1fr 1fr; gap: 6px; }
+  .mkt-head > :nth-child(3), .mkt-row > :nth-child(3),
+  .mkt-head > :nth-child(4), .mkt-row > :nth-child(4),
+  .mkt-head > :nth-child(6), .mkt-row > :nth-child(6) { display: none; }
+  .mkt-row { font-size: 12px; padding: 8px 6px; }
+  .mkt-head { padding: 4px 6px 8px; }
+
+  table.book { font-size: 12px; }
+  .book th, .book td { padding: 6px 4px; }
+  .sync-card { margin: 24px auto; }
+}
+
 /* PiP keep-alive window (Document Picture-in-Picture, Chromium) */
 .pip-body { margin: 0; background: var(--bg); color: var(--text); }
 .pip-keeper { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 1.45; }

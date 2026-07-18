@@ -331,9 +331,19 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       offline: 'Network unreachable — retrying…',
       ready: 'Finishing…',
     };
-    const pct = sync.targetHeight > 0
-      ? Math.min(100, Math.round((sync.localHeight / sync.targetHeight) * 100))
-      : 0;
+    // Fast-sync phases report through `aux` — the chain height itself doesn't
+    // move until the verified anchor is seeded in one step at the end, so the
+    // block counter would sit frozen for the whole download and look stuck.
+    const fast = (sync.phase === 'headers' || sync.phase === 'snapshot') && sync.aux && sync.aux.total > 0
+      ? sync.aux : null;
+    const pct = fast
+      ? Math.min(100, Math.round((fast.done / fast.total) * 100))
+      : sync.targetHeight > 0
+        ? Math.min(100, Math.round((sync.localHeight / sync.targetHeight) * 100))
+        : 0;
+    const detail = fast
+      ? (sync.phase === 'headers' ? `(header ${fast.done.toLocaleString()} of ${fast.total.toLocaleString()})` : '')
+      : sync.targetHeight > 0 ? `(block ${sync.localHeight.toLocaleString()} of ${sync.targetHeight.toLocaleString()})` : '';
     return el('section', { class: 'view' },
       el('div', { class: 'card sync-card' },
         el('h3', {}, 'Syncing the BrowserCoin chain'),
@@ -343,7 +353,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         el('div', { class: 'progress big' }, el('div', { class: 'bar', style: `width:${pct}%` })),
         el('p', { class: 'muted' },
           `${PHASE_LABEL[sync.phase] ?? sync.phase} `,
-          sync.targetHeight > 0 ? `(block ${sync.localHeight.toLocaleString()} of ${sync.targetHeight.toLocaleString()})` : ''),
+          detail),
         el('p', { class: 'muted text-sm' }, 'Trading unlocks automatically when the chain is verified. Active swaps resume on their own.'),
       ),
     );
@@ -1059,6 +1069,24 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
 
   // ------------------------------------------------------------- history tab
 
+  /** One chip per pair — clicking switches the active pair everywhere (the
+   * Market tab's book follows along, same persisted selection). */
+  function pairChips(): HTMLElement {
+    return el('div', { class: 'pair-chips' },
+      ...Object.values(PAIRS).map((p) => {
+        const b = el('button', { class: `chip${p.key === marketPair ? ' active' : ''}` }) as HTMLButtonElement;
+        b.textContent = p.label;
+        b.onclick = () => {
+          if (p.key === marketPair) return;
+          marketPair = p.key;
+          bookPage = { ask: 0, bid: 0 };
+          localStorage.setItem('bswap.pair.v1', p.key);
+          render();
+        };
+        return b;
+      }));
+  }
+
   function historyView(): HTMLElement {
     ensureHistory();
     const view = el('section', { class: 'view' });
@@ -1066,7 +1094,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     const trades = historyTrades.filter((t) => (t.pair ?? DEFAULT_PAIR) === marketPair);
     if (trades.length === 0) {
       view.append(el('div', { class: 'card' },
-        el('h3', {}, `Market history — ${pc.label}`),
+        el('div', { class: 'row spread' }, el('h3', {}, `Market history — ${pc.label}`), pairChips()),
         el('p', { class: 'muted' },
           'No completed swaps recorded on this pair yet. Trades appear here after the market server verifies their completion on-chain — self-reported or fake trades never show up.'),
       ));
@@ -1083,7 +1111,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       el('div', { class: 'wallet-cell' }, el('div', { class: 'label-sm' }, label), el('strong', {}, value));
 
     view.append(el('div', { class: 'card' },
-      el('h3', {}, `Market history — ${pc.label}`),
+      el('div', { class: 'row spread' }, el('h3', {}, `Market history — ${pc.label}`), pairChips()),
       el('div', { class: 'wallets' },
         statCell('Last price', `${last.price.toFixed(6)} ${pc.tokenSymbol}/BRC`),
         statCell('24h volume', `${formatUnits(dayVolToken, pc.tokenDecimals, pc.displayDecimals)} ${pc.tokenSymbol} · ${formatBrc(dayVolBrc)} BRC`),
@@ -1096,16 +1124,16 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     ));
 
     view.append(el('div', { class: 'card' },
-      el('h3', {}, `Price (${net().tokenSymbol} per BRC)`),
+      el('h3', {}, `Price (${pc.tokenSymbol} per BRC)`),
       trades.length >= 2 ? priceChart(trades) : el('p', { class: 'muted' }, 'The chart appears after the second completed trade.'),
     ));
 
     const tbody = el('tbody');
     for (const t of [...trades].reverse().slice(0, 25)) {
       tbody.append(el('tr', {},
-        el('td', {}, new Date(t.ts * 1000).toLocaleString()),
+        el('td', {}, new Date(t.ts * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })),
         el('td', {}, formatBrc(BigInt(t.amountBrc))),
-        el('td', {}, formatUnits(BigInt(t.amountToken), net().tokenDecimals, 2)),
+        el('td', {}, formatUnits(BigInt(t.amountToken), pc.tokenDecimals, pc.displayDecimals)),
         el('td', {}, t.price.toFixed(6)),
       ));
     }
@@ -1113,7 +1141,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       el('h3', {}, 'Recent trades'),
       el('table', { class: 'book' },
         el('thead', {}, el('tr', {},
-          el('th', {}, 'When'), el('th', {}, 'BRC'), el('th', {}, net().tokenSymbol), el('th', {}, `${net().tokenSymbol}/BRC`),
+          el('th', {}, 'When'), el('th', {}, 'BRC'), el('th', {}, pc.tokenSymbol), el('th', {}, `${pc.tokenSymbol}/BRC`),
         )),
         tbody,
       ),
