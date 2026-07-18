@@ -354,6 +354,10 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         el('p', { class: 'muted' },
           `${PHASE_LABEL[sync.phase] ?? sync.phase} `,
           detail),
+        // Why ISN'T this a fast sync? (attempt failed / helpers too old /
+        // helpers unreachable) — without this line a phone user just sees a
+        // slow grind and has no console to find out why.
+        sync.fastSyncNote ? el('p', { class: 'text-sm sync-note' }, sync.fastSyncNote) : '',
         el('p', { class: 'muted text-sm' }, 'Trading unlocks automatically when the chain is verified. Active swaps resume on their own.'),
       ),
     );
