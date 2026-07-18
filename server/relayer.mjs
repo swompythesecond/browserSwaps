@@ -135,10 +135,20 @@ export function createRelayer() {
     return hash;
   }
 
+  // We earn the fee in whatever token the op names. A caller who points us at a
+  // worthless token they control can pay a huge nominal fee that costs them
+  // nothing while we spend real ETH gas — a hot-wallet drain. Only ever relay
+  // for the one token we actually value.
+  const TOKEN_LC = TOKEN.toLowerCase();
+  const requireSupportedToken = (token) => {
+    if (String(token ?? '').toLowerCase() !== TOKEN_LC) throw new Error('unsupported token');
+  };
+
   async function handleOp(op, body) {
     switch (op) {
       case 'lockWithPermit': {
         const it = body.intent;
+        requireSupportedToken(it.token);
         const intent = {
           token: it.token, amount: BigInt(it.amount), hashlock: it.hashlock,
           recipient: it.recipient, timelock: BigInt(it.timelock),
@@ -152,6 +162,7 @@ export function createRelayer() {
       }
       case 'withdrawWithPermit': {
         const it = body.intent;
+        requireSupportedToken(it.token);
         const intent = {
           token: it.token, to: it.to, amount: BigInt(it.amount),
           fee: BigInt(it.fee), deadline: BigInt(it.deadline), salt: it.salt,
@@ -165,11 +176,13 @@ export function createRelayer() {
       case 'claim': {
         const lock = await readLock(body.id);
         if (lock.sender === '0x0000000000000000000000000000000000000000') throw new Error('unknown lock');
+        requireSupportedToken(lock.token);
         return submit('claim', [body.id, body.secret], lock.relayFee);
       }
       case 'refund': {
         const lock = await readLock(body.id);
         if (lock.sender === '0x0000000000000000000000000000000000000000') throw new Error('unknown lock');
+        requireSupportedToken(lock.token);
         return submit('refund', [body.id], lock.relayFee);
       }
       default:

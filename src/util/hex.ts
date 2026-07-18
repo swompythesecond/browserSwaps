@@ -10,6 +10,10 @@ export function bytesToHex(b: Uint8Array): string {
 export function hexToBytes(hex: string): Uint8Array {
   const h = hex.startsWith('0x') ? hex.slice(2) : hex;
   if (h.length % 2 !== 0) throw new Error('odd hex length');
+  // Validate the WHOLE string up front: parseInt('0z',16) returns 0 (it stops
+  // at the first bad nibble) rather than NaN, so a per-pair NaN check silently
+  // truncates half-invalid input instead of rejecting it.
+  if (!/^[0-9a-fA-F]*$/.test(h)) throw new Error('bad hex');
   const out = new Uint8Array(h.length / 2);
   for (let i = 0; i < out.length; i++) {
     const byte = parseInt(h.slice(i * 2, i * 2 + 2), 16);

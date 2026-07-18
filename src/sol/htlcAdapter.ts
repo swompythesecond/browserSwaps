@@ -422,11 +422,15 @@ export class HtlcSolAdapter implements EvmAdapter {
     // status is monotonic (open -> claimed|refunded): trust the furthest RPC.
     const status = Math.max(...views.map((x) => x.status));
     // `finalized` visibility is the Solana analog of the EVM `safe` tag
-    // (supermajority-rooted, ~13 s — not merely sequencer-confirmed).
-    let safe = false;
-    try {
-      safe = (await this.viaRpc((c) => c.getAccountInfo(pda, 'finalized'))) !== null;
-    } catch { safe = false; }
+    // (supermajority-rooted, ~13 s — not merely sequencer-confirmed). It gates
+    // large swaps, so — like the immutable fields above — it must clear a
+    // quorum: one RPC must not be able to fake finality and let the
+    // counterparty commit against a lock that can still be rolled back.
+    const finalReads = await Promise.allSettled(
+      this.verifiers.map(async (conn) => (await conn.getAccountInfo(pda, 'finalized')) !== null),
+    );
+    const finalSeen = finalReads.filter((r) => r.status === 'fulfilled' && r.value).length;
+    const safe = finalSeen >= Math.min(2, this.verifiers.length);
     // Age since WE first saw the lock (observation age, wall clock — used for
     // the small-swap "let it settle for a minute" policy).
     const seenKey = `bswap.sol.lockseen.${lockId}`;

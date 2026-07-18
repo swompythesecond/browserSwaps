@@ -389,16 +389,21 @@ export class HtlcEvmAdapter implements EvmAdapter {
     if (new Set(views.map(key)).size > 1) throw new Error('RPCs disagree about lock — refusing to proceed');
     if (views.length < Math.min(2, this.verifiers.length)) return null; // quorum must SEE it
     const v = views[0]!;
-    let safe = false;
-    try {
-      const safeRow = await this.primary.readContract({
+    // Strong finality must clear the SAME quorum as the immutable fields above.
+    // `safe` is the ONLY finality gate for large swaps, so a single RPC must not
+    // be able to fake it — otherwise a lock that is still reorg-able on the
+    // sequencer looks L1-final, the counterparty commits its leg, and the lock
+    // is then reorged away. Require a quorum to see the lock at the `safe` tag;
+    // an RPC that throws (no `safe` support) simply doesn't count toward it.
+    const safeReads = await Promise.allSettled(this.verifiers.map(async (c) => {
+      const r = await c.readContract({
         address: this.cfg.htlc as `0x${string}`, abi: HTLC_ABI,
         functionName: 'locks', args: [lockId as `0x${string}`], blockTag: 'safe',
       }) as Row;
-      safe = safeRow[1] !== '0x0000000000000000000000000000000000000000';
-    } catch {
-      safe = false; // RPC lacks `safe` tag support: treat as not yet L1-posted
-    }
+      return r[1] !== '0x0000000000000000000000000000000000000000';
+    }));
+    const safeSeen = safeReads.filter((r) => r.status === 'fulfilled' && r.value).length;
+    const safe = safeSeen >= Math.min(2, this.verifiers.length);
     const firstSeenKey = `bswap.lockseen.${lockId}`;
     let firstSeen = Number(localStorage.getItem(firstSeenKey) ?? '0');
     if (!firstSeen) {
