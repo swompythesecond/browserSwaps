@@ -285,14 +285,21 @@ export class SwapEngine {
         }
         // The lock id commits to token/amount/recipient/hashlock/timelock, so
         // existence == parameter correctness for THOSE. relayFee is NOT in the
-        // id and NOT bound by it — a buyer can set it to amount-1, and since a
-        // non-beneficiary claim (the relayer, or the buyer front-running us with
-        // the secret they already know) pays relayFee to the submitter out of
-        // `amount`, an unchecked fee drains our proceeds to dust. Reject any fee
-        // above the standard claim fee before we lock anything.
-        const maxRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(swap.pair).feeMinUnits);
-        if (view.relayFee > maxRelayFee) {
-          this.fail(swap, 'USDT lock relayFee too high');
+        // id and NOT bound by it, so we must pin it ourselves — on BOTH sides,
+        // before we lock anything, because relayFee is immutable once the lock
+        // exists.
+        //   Too HIGH: a non-beneficiary claim (the relayer, or the buyer
+        //   front-running us with the secret they already know) pays relayFee
+        //   to the submitter out of `amount`, draining our proceeds to dust.
+        //   Too LOW: our own claim is unrelayable — the relayer rejects any fee
+        //   below its per-chain minimum — so a browser-tab seller with no native
+        //   gas cannot exit, the lock rots to timelock, and the buyer refunds
+        //   and keeps the BRC. A relayFee=0 lock passes every id-bound check.
+        // The honest fee is deterministic (every buyer's adapter computes this
+        // exact value), so require equality — it closes both sides at once.
+        const expectedRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(swap.pair).feeMinUnits);
+        if (view.relayFee !== expectedRelayFee) {
+          this.fail(swap, 'USDT lock relayFee is not the standard claim fee');
           return;
         }
         // Remaining checks are policy:

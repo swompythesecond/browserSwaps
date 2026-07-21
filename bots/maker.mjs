@@ -259,12 +259,14 @@ async function tickSwap(hashlock) {
       if (!view) { if (now - s.createdAt > 1800) { s.state = 'failed'; console.log('[fail] buyer never locked the tokens'); } return; }
       if (view.claimed || view.refunded) { s.state = 'failed'; return; }
       // relayFee is NOT part of the lock id, so lock existence does not vouch
-      // for it. A buyer who sets relayFee near `amount` drains our proceeds: a
-      // non-beneficiary claim (relayer, or the buyer front-running with the
-      // secret) pays relayFee to the submitter out of `amount`. Reject anything
-      // above the standard claim fee before we lock BRC.
-      const maxRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(cfg.pair).feeMinUnits);
-      if (view.relayFee > maxRelayFee) { s.state = 'failed'; console.log('[fail] token lock relayFee too high'); return; }
+      // for it, and it is immutable once locked — so we pin it on BOTH sides
+      // before locking BRC. Too high (near `amount`) drains our proceeds when a
+      // non-beneficiary claim pays relayFee to the submitter out of `amount`;
+      // too low (below the relayer's per-chain minimum, e.g. 0) makes our own
+      // claim unrelayable, stranding a gasless seller until the buyer refunds
+      // and keeps the BRC. The honest fee is deterministic, so require equality.
+      const expectedRelayFee = relayerFee(view.amount, CLAIM_FEE_BPS, pairConfig(cfg.pair).feeMinUnits);
+      if (view.relayFee !== expectedRelayFee) { s.state = 'failed'; console.log('[fail] token lock relayFee is not the standard claim fee'); return; }
       if (view.timelock - now < 20 * 3600) { s.state = 'failed'; console.log('[fail] token lock window too short'); return; }
       s.lockId = lockId;
       s.state = 'lock-brc';

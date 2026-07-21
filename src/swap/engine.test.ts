@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SwapEngine, type OutboundHint } from './engine.js';
 import { SwapStore } from './store.js';
 import type { BrcAdapter, BrcLockView, EvmAdapter, EvmLockView, SwapRecord } from './types.js';
-import { SWAP_TIMING } from '../config.js';
+import { SWAP_TIMING, relayerFee, CLAIM_FEE_BPS, pairConfig } from '../config.js';
+
+// The honest relayFee every buyer's adapter stores in the lock, for the
+// default-pair fixture amount below. The seller gate now requires this exact
+// value, so the happy path must present it.
+const HONEST_RELAY_FEE = relayerFee(5_000_000n, CLAIM_FEE_BPS, pairConfig(undefined).feeMinUnits);
 
 // localStorage shim for the node test environment
 const mem = new Map<string, string>();
@@ -33,7 +38,7 @@ class MockEvm implements EvmAdapter {
     this.lockView = {
       token: '0xT', sender: '0xSELF', recipient: '0xCP', amount: 5_000_000n,
       hashlock: HASH, timelock: T0 + SWAP_TIMING.evmTimelockSecs,
-      relayFee: 0n, claimed: false, refunded: false, safe: true, ageSecs: 120,
+      relayFee: HONEST_RELAY_FEE, claimed: false, refunded: false, safe: true, ageSecs: 120,
     };
     return { lockId: '0xlockid', txHash: '0xtx1' };
   }
@@ -215,7 +220,9 @@ describe('SwapEngine', () => {
   it('seller does not lock BRC until the finality policy is met', async () => {
     store.put(baseSwap('seller'));
     await evm.lock();
-    evm.lockView = { ...evm.lockView!, safe: false, ageSecs: 5, amount: 500_000_000n }; // large + not safe
+    const largeAmount = 500_000_000n; // large + not safe
+    evm.lockView = { ...evm.lockView!, safe: false, ageSecs: 5, amount: largeAmount,
+      relayFee: relayerFee(largeAmount, CLAIM_FEE_BPS, pairConfig(undefined).feeMinUnits) };
     await engine.tick(HASH);
     expect(store.get(HASH)!.state).toBe('awaiting-evm-lock');
     evm.lockView = { ...evm.lockView, safe: true };
@@ -229,6 +236,19 @@ describe('SwapEngine', () => {
     // relayFee is not committed by the lock id; a buyer sets it near `amount`
     // so a non-beneficiary claim skims almost everything from our proceeds.
     evm.lockView = { ...evm.lockView!, relayFee: evm.lockView!.amount - 1n };
+    await engine.tick(HASH);
+    expect(store.get(HASH)!.state).toBe('failed');
+    expect(brc.lock).toBeNull(); // we must NOT have locked BRC
+  });
+
+  it('seller rejects a USDT lock whose relayFee is too low to relay the claim', async () => {
+    store.put(baseSwap('seller'));
+    await evm.lock();
+    // A too-low relayFee (0 here) passes every id-bound check but leaves our
+    // own claim below the relayer's minimum: a gasless seller could never exit,
+    // the lock would rot to timelock, and the buyer would refund and keep the
+    // BRC. Reject it before committing BRC, same as a too-high fee.
+    evm.lockView = { ...evm.lockView!, relayFee: 0n };
     await engine.tick(HASH);
     expect(store.get(HASH)!.state).toBe('failed');
     expect(brc.lock).toBeNull(); // we must NOT have locked BRC
