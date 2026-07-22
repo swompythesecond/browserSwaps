@@ -52,7 +52,11 @@ const history = createHistory({
 // For real scale set SOL_RPCS to a keyed RPC (Helius/Alchemy) — keyed limits far
 // exceed the keyless public ones, and the key stays secret here on the server.
 const SOL_RPC_UPSTREAMS = (process.env.SOL_RPCS || dotenv.SOL_RPCS
-  || process.env.SOL_RPC || dotenv.SOL_RPC || 'https://api.mainnet-beta.solana.com')
+  || process.env.SOL_RPC || dotenv.SOL_RPC
+  // Default to TWO keyless endpoints so solRpcForward has somewhere to fail over
+  // when one 429s. A single keyless upstream (the old default) meant any 429 was
+  // fatal — the root of the "failed to get recent blockhash" withdrawal errors.
+  || 'https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com')
   .split(',').map((s) => s.trim()).filter(Boolean);
 const SOL_RPC_METHODS = new Set([
   'getAccountInfo', 'getBalance', 'getMultipleAccounts', 'getTokenAccountBalance',
@@ -69,7 +73,18 @@ const SOL_RPC_CACHEABLE = new Set([
   'getSlot', 'getBlockHeight', 'getEpochInfo', 'isBlockhashValid', 'getMinimumBalanceForRentExemption',
   'getFeeForMessage', 'getGenesisHash', 'getVersion', 'getHealth',
 ]);
-const SOL_RPC_CACHE_TTL = 1500;              // ms — swap-state reads tolerate this
+const SOL_RPC_CACHE_TTL = 4000;              // ms — swap-state reads tolerate this;
+                                             // raised from 1500 to cut upstream
+                                             // (keyed-RPC) reads ~2.5x under load
+// Blockhashes stay valid ~60-90s, so a mildly stale one is still submittable.
+// Cache them longer than other reads to collapse the shared-IP proxy's upstream
+// getLatestBlockhash calls onto ~one per window; and when every upstream 429s,
+// serve the last good blockhash (up to STALE ms old) rather than failing the
+// caller's withdrawal outright. STALE is kept well under blockhash validity to
+// leave landing margin.
+const SOL_BLOCKHASH_FRESH_TTL = 8_000;       // serve cached without refetch this long
+const SOL_BLOCKHASH_STALE_TTL = 30_000;      // serve cached on upstream failure up to here
+const ttlFor = (method) => (method === 'getLatestBlockhash' ? SOL_BLOCKHASH_FRESH_TTL : SOL_RPC_CACHE_TTL);
 const solRpcCache = new Map();               // key -> { t, result }
 const solRpcInflight = new Map();            // key -> Promise<{ status, text }>
 let solRpcRR = 0;                            // round-robin cursor over upstreams
@@ -122,7 +137,7 @@ function handleSolRpc(req, res, url, cors) {
         if (one && SOL_RPC_CACHEABLE.has(one.method)) {
           const key = `${one.method}:${JSON.stringify(one.params ?? [])}`;
           const hit = solRpcCache.get(key);
-          if (hit && Date.now() - hit.t < SOL_RPC_CACHE_TTL) {
+          if (hit && Date.now() - hit.t < ttlFor(one.method)) {
             return send(200, JSON.stringify({ jsonrpc: '2.0', id: one.id, result: hit.result }));
           }
           let p = solRpcInflight.get(key);
@@ -140,12 +155,21 @@ function handleSolRpc(req, res, url, cors) {
             solRpcInflight.set(key, p);
           }
           const r = await p;
+          let parsed2 = null;
+          try { parsed2 = JSON.parse(r.text); } catch { /* non-JSON upstream body */ }
+          const succeeded = r.status === 200 && parsed2 && 'result' in parsed2;
+          // Blockhash resilience: if every upstream just failed (429/5xx), fall
+          // back to the most recent cached blockhash while it's still young
+          // enough to land — a mildly stale blockhash beats a failed withdrawal.
+          if (!succeeded && one.method === 'getLatestBlockhash') {
+            const stale = solRpcCache.get(key);
+            if (stale && Date.now() - stale.t < SOL_BLOCKHASH_STALE_TTL) {
+              return send(200, JSON.stringify({ jsonrpc: '2.0', id: one.id, result: stale.result }));
+            }
+          }
           let out = r.text;
-          try {
-            const j = JSON.parse(r.text);
-            if ('result' in j) out = JSON.stringify({ jsonrpc: '2.0', id: one.id, result: j.result });
-            else if ('error' in j) out = JSON.stringify({ jsonrpc: '2.0', id: one.id, error: j.error });
-          } catch { /* pass upstream body through verbatim */ }
+          if (parsed2 && 'result' in parsed2) out = JSON.stringify({ jsonrpc: '2.0', id: one.id, result: parsed2.result });
+          else if (parsed2 && 'error' in parsed2) out = JSON.stringify({ jsonrpc: '2.0', id: one.id, error: parsed2.error });
           return send(r.status, out);
         }
         // Non-cacheable (sendTransaction, simulate, batches): straight passthrough.

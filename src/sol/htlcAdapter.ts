@@ -41,6 +41,8 @@ const NATIVE_RESERVE = 3_000_000n;
  * a brand-new address fails outright. */
 const MIN_NATIVE_WITHDRAW = 1_000_000n; // 0.001 SOL
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 /** SOL a wallet needs before self-submitting is worth attempting (~40 txs). */
 const MIN_SELF_SUBMIT_LAMPORTS = 200_000;
 
@@ -173,6 +175,26 @@ export class HtlcSolAdapter implements EvmAdapter {
     for (const conn of this.conns) {
       try {
         return await fn(conn);
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    throw lastError;
+  }
+
+  /** Fetch a recent blockhash, retrying a few times with a short backoff. The
+   * keyless public Solana RPCs 429 in bursts, and every send — including a
+   * gasless withdrawal — must set a blockhash BEFORE the user signs, so a
+   * single 429 here hard-fails the whole withdrawal ("failed to get recent
+   * blockhash"). A blockhash stays valid for ~60-90s, so a spaced retry (and
+   * the server proxy's stale-blockhash fallback) rides out a transient storm;
+   * the added latency is invisible next to signing + the relay round-trip. */
+  private async recentBlockhash(): Promise<string> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(300 * attempt);
+      try {
+        return (await this.viaRpc((c) => c.getLatestBlockhash('confirmed'))).blockhash;
       } catch (e) {
         lastError = e;
       }
@@ -326,7 +348,7 @@ export class HtlcSolAdapter implements EvmAdapter {
     for (const ix of await this.wrapIxs(p.amount + lockFee)) tx.add(ix);
     tx.add(this.lockInstruction({ ...p, payer: feePayer, lockFee }));
     tx.feePayer = feePayer;
-    tx.recentBlockhash = (await this.viaRpc((c) => c.getLatestBlockhash('confirmed'))).blockhash;
+    tx.recentBlockhash = await this.recentBlockhash();
     tx.partialSign(this.keypair);
     return this.postToRelayer({
       op: 'solLock',
@@ -501,7 +523,7 @@ export class HtlcSolAdapter implements EvmAdapter {
     const tx = new Transaction();
     for (const ix of await this.withdrawInstructions(to, amount, feePayer, fee)) tx.add(ix);
     tx.feePayer = feePayer;
-    tx.recentBlockhash = (await this.viaRpc((c) => c.getLatestBlockhash('confirmed'))).blockhash;
+    tx.recentBlockhash = await this.recentBlockhash();
     tx.partialSign(this.keypair);
     return this.postToRelayer({
       op: 'solWithdraw',
@@ -579,7 +601,7 @@ export class HtlcSolAdapter implements EvmAdapter {
 
   private async signAndSend(tx: Transaction): Promise<string> {
     tx.feePayer = this.keypair.publicKey;
-    tx.recentBlockhash = (await this.viaRpc((c) => c.getLatestBlockhash('confirmed'))).blockhash;
+    tx.recentBlockhash = await this.recentBlockhash();
     tx.sign(this.keypair);
     const raw = tx.serialize();
     const sig = await this.viaRpc((c) => c.sendRawTransaction(raw, { maxRetries: 5 }));

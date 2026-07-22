@@ -349,8 +349,12 @@ export const MARKET = {
   offerPollMs: 5_000,
   /** Drain our handshake mailbox every N ms. */
   mailboxPollMs: 2_500,
-  /** How often the swap engine ticks active swaps. */
-  engineTickMs: 5_000,
+  /** How often the swap engine ticks active swaps. This is also the cadence of
+   * each active swap's foreign-chain reads (the getLock finality quorum), so it
+   * sets the Solana RPC read rate. 10s is well within the swap's hour-scale
+   * timelock margins and roughly halves that read load vs the old 5s; the fast
+   * handshake stays responsive on its own offer/mailbox timers. */
+  engineTickMs: 10_000,
 } as const;
 
 /** BRC uses 8 decimals (like the chain's smallest unit). */
