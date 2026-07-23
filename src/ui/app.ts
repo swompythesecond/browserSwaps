@@ -2,7 +2,7 @@
  * Everything re-renders from live state on node/store/market events. */
 import type { Node } from '@bc/node.js';
 import type { PrivateKeyAccount } from 'viem/accounts';
-import { loadSettings, saveSettings, activeNetwork, EVM_NETWORKS, MARKET, RELAY, BRC_LOCK_FEE_DEFAULT, BRC_LOCK_FEE_MIN, relayerFee, maxSendable, LOCK_FEE_BPS, CLAIM_FEE_BPS, WITHDRAW_FEE_BPS, PAIRS, DEFAULT_PAIR, UI_DEFAULT_PAIR, pairConfig, activeSolNetwork } from '../config.js';
+import { loadSettings, saveSettings, activeNetwork, EVM_NETWORKS, MARKET, RELAY, BRC_LOCK_FEE_DEFAULT, BRC_LOCK_FEE_MIN, relayerFee, maxSendable, LOCK_FEE_BPS, CLAIM_FEE_BPS, WITHDRAW_FEE_BPS, PAIRS, DEFAULT_PAIR, UI_DEFAULT_PAIR, pairConfig, activeSolNetwork, TRADING_CLOSED, DISCORD_INVITE } from '../config.js';
 
 /** Format basis points as a percent string, e.g. 40n -> "0.4%". */
 const fmtBps = (bps: bigint): string => `${Number(bps) / 100}%`;
@@ -378,6 +378,27 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       ? Boolean(activeSolNetwork(pc.network).htlcProgram)
       : Boolean(net().htlc && net().token);
 
+    // --- wind-down notice: the FIRST thing anyone sees. Trading is off; the
+    // whole job of this banner is to get people to withdraw their funds. ---
+    if (TRADING_CLOSED) {
+      const withdrawBtn = el('button', { class: 'btn primary' }, 'Withdraw my funds') as HTMLButtonElement;
+      withdrawBtn.onclick = () =>
+        document.getElementById('withdraw-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      view.append(el('div', { class: 'banner danger wind-down' },
+        el('h3', {}, '📢 BrowserSwaps has disabled trading please withdraw your funds!'),
+        el('p', {},
+          'Trading is now turned off: you can no longer post or take offers. This website will stay online for some time precisely so everyone can get their money out safely. Withdrawals work as normal, any swap already in progress finishes normally, and nothing is stranded.'),
+        el('p', {},
+          'Why? I’ve decided to focus my time on BrowserCoin itself rather than running a marketplace on top of it. A place where people trade real money carries a lot of responsibility and security risk and this platform was just too rushed, and doing that safely deserves more attention than I can give it right now so I’d rather wind trading down calmly, while everyone can still withdraw in their own time, than keep it running half-watched.'),
+        el('p', {},
+          el('strong', {}, 'Please withdraw your BRC and tokens using the Withdraw section below.'),
+          ' Questions or need a hand getting your funds out? Join ',
+          el('a', { href: DISCORD_INVITE, target: '_blank', rel: 'noopener noreferrer' }, 'our Discord'),
+          '.'),
+        el('div', { class: 'row' }, withdrawBtn),
+      ));
+    }
+
     // --- markets overview: every pair at a glance, whole market in one look;
     // the highlighted row is the open book, clicking another switches to it.
     ensureHistory();
@@ -478,6 +499,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     const asks = rows.filter((r) => r.offer.side === 'sell-brc').sort((a, b) => b.price - a.price);
     const bids = rows.filter((r) => r.offer.side === 'buy-brc').sort((a, b) => b.price - a.price);
     const openFill = (offerId: string): void => {
+      if (TRADING_CLOSED) { toast('Trading is disabled — please withdraw your funds (see the notice at the top).'); return; }
       if (!cfgReady) { toast('Configure the HTLC contract in Settings first.'); return; }
       fillOfferId = offerId;
       fillBusy = false;
@@ -507,7 +529,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
       ));
       return cell;
     };
-    view.append(el('div', { class: 'card' },
+    if (!TRADING_CLOSED) view.append(el('div', { class: 'card' },
       el('h3', {}, 'Quick trade'),
       el('div', { class: 'wallets' },
         quickTile('Buy BRC — cheapest offer', bestAskRow, 'No sell offers right now.'),
@@ -689,7 +711,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
         toast('Offer posted. It stays live while this tab is open.');
       } catch (e) { toast((e as Error).message); }
     };
-    view.append(el('div', { class: 'card' },
+    if (!TRADING_CLOSED) view.append(el('div', { class: 'card' },
       el('div', { class: 'row spread' },
         el('h3', {}, 'Post an offer'),
         el('div', { class: 'row' }, ...sideBtns),
@@ -816,7 +838,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     }
     if (spreadParts.length === 0) spreadParts.push('no trades yet');
 
-    view.append(el('div', { class: 'card' },
+    if (!TRADING_CLOSED) view.append(el('div', { class: 'card' },
       el('div', { class: 'row spread' },
         el('h3', {}, 'Order book'),
         el('span', { class: 'muted' }, `${asks.length} sell · ${bids.length} buy`),
@@ -844,7 +866,7 @@ export function mountApp(root: HTMLElement, ctx: AppCtx): void {
     ));
 
     // --- withdrawals, right where the money is ---
-    view.append(el('div', { class: 'card' },
+    view.append(el('div', { class: 'card', id: 'withdraw-card' },
       el('h3', {}, 'Withdraw'),
       el('div', { class: 'wallets' },
         el('div', { class: 'wallet-cell' }, withdrawBrcForm()),

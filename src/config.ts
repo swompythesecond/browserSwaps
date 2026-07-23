@@ -165,6 +165,19 @@ export function pairConfig(key: string | undefined): PairConfig {
   return PAIRS[key ?? DEFAULT_PAIR] ?? PAIRS[DEFAULT_PAIR]!;
 }
 
+// ---------------------------------------------------------------------------
+// Wind-down switch. BrowserSwaps is being retired: when TRADING_CLOSED is true
+// the app blocks every NEW trade (posting an offer, taking an offer) and shows
+// a prominent notice asking users to withdraw their balances. What deliberately
+// KEEPS working: withdrawals, and any swap already in flight — those always run
+// to completion so nobody's funds get stranded. This is a CLIENT-ONLY gate (the
+// relayer/market server still function); flip it back to false to re-open.
+// ---------------------------------------------------------------------------
+export const TRADING_CLOSED = true;
+
+/** Where the wind-down notice points people with questions. */
+export const DISCORD_INVITE = 'https://discord.gg/xV3De6ErTr';
+
 const SETTINGS_KEY = 'bswap.settings.v1';
 
 export interface Settings {

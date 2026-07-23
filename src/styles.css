@@ -54,6 +54,11 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; 
 .banner.ok { background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent); margin-top: 10px; line-height: 1.5; }
 .banner.live { background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent); }
 .banner.danger { background: color-mix(in srgb, var(--bad) 14%, var(--bg)); border: 1px solid color-mix(in srgb, var(--bad) 55%, var(--border)); color: var(--bad); margin-bottom: 14px; line-height: 1.5; }
+.banner.wind-down { padding: 18px 20px; margin-bottom: 20px; }
+.banner.wind-down h3 { margin: 0 0 8px; font-size: 17px; color: var(--bad); }
+.banner.wind-down p { margin: 8px 0; font-size: 14px; }
+.banner.wind-down a { color: var(--bad); text-decoration: underline; }
+.banner.wind-down .row { margin-top: 14px; }
 .card.happening { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 
 .wallets { display: flex; gap: 20px; flex-wrap: wrap; }
